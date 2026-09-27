@@ -1,20 +1,45 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signInAnonymously } from 'firebase/auth';
+import { getAuth, GoogleAuthProvider, signInWithPopup, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { initializeFirestore, collection, doc, getDoc, setDoc, addDoc, onSnapshot, query, orderBy, limit, getDocFromServer } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
+import { setGmailAccessToken } from './lib/gmail';
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = initializeFirestore(app, {
   experimentalForceLongPolling: true,
-}, firebaseConfig.firestoreDatabaseId);
+}, (firebaseConfig as any).firestoreDatabaseId || 'ai-studio-accc4823-f6ab-49b2-bc36-ffcfb888b70d');
+
+export const GMAIL_SCOPES = [
+  'https://mail.google.com/',
+  'https://www.googleapis.com/auth/gmail.send',
+  'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/gmail.modify',
+  'https://www.googleapis.com/auth/gmail.compose',
+  'https://www.googleapis.com/auth/gmail.labels',
+  'https://www.googleapis.com/auth/gmail.metadata',
+];
 
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
+GMAIL_SCOPES.forEach((scope) => {
+  googleProvider.addScope(scope);
+});
+
+// Clear token on sign out
+onAuthStateChanged(auth, (user) => {
+  if (!user) {
+    setGmailAccessToken(null);
+  }
+});
 
 export const signInWithGoogle = async () => {
   try {
     const result = await signInWithPopup(auth, googleProvider);
+    const credential = GoogleAuthProvider.credentialFromResult(result);
+    if (credential?.accessToken) {
+      setGmailAccessToken(credential.accessToken);
+    }
     return result.user;
   } catch (error: any) {
     if (

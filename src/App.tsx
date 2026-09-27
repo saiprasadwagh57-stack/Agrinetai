@@ -9,6 +9,8 @@ import {
 } from "./firebase";
 import { predictPrice, analyzeQuality, processVoiceCommand, getLocationName } from "./ai";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { GmailHub } from "./components/GmailHub";
+import { getGmailAccessToken, isGmailConnected } from "./lib/gmail";
 import { getT } from "./lib/i18n";
 import { 
   onAuthStateChanged, 
@@ -65,6 +67,7 @@ import {
   ArrowDownLeft,
   Building2,
   Smartphone,
+  Mail,
   Languages
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
@@ -94,6 +97,7 @@ interface Product {
 interface UserProfile {
   name: string;
   phone: string;
+  email?: string;
   role: "farmer" | "buyer" | "admin";
   language?: LanguageCode;
   createdAt: any;
@@ -350,8 +354,20 @@ export default function App() {
     ifscCode: ""
   });
   const [loading, setLoading] = useState(true);
-  const [view, setView] = useState<"dashboard" | "marketplace" | "profile" | "auth" | "messages" | "cart" | "checkout" | "orders" | "wallet" | "admin">("auth");
+  const [view, setView] = useState<"dashboard" | "marketplace" | "profile" | "auth" | "messages" | "cart" | "checkout" | "orders" | "wallet" | "admin" | "gmail">("auth");
   const [asyncError, setAsyncError] = useState<Error | null>(null);
+
+  // Gmail pre-filled draft states
+  const [gmailDraftTo, setGmailDraftTo] = useState("");
+  const [gmailDraftSubject, setGmailDraftSubject] = useState("");
+  const [gmailDraftBody, setGmailDraftBody] = useState("");
+
+  const handleOpenGmailWithDraft = (to: string, subject: string, body?: string) => {
+    setGmailDraftTo(to);
+    setGmailDraftSubject(subject);
+    setGmailDraftBody(body || "");
+    navigateTo("gmail");
+  };
 
   if (asyncError) throw asyncError;
 
@@ -660,14 +676,24 @@ export default function App() {
 
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [showPhoneLogin, setShowPhoneLogin] = useState(false);
+  const [otpSuccessMsg, setOtpSuccessMsg] = useState<string | null>(null);
   const [phoneInput, setPhoneInput] = useState("");
+  const [emailInput, setEmailInput] = useState("");
   const [otpInput, setOtpInput] = useState("");
   const [otpSent, setOtpSent] = useState(false);
   const [demoOtpCode, setDemoOtpCode] = useState("");
   const [phoneName, setPhoneName] = useState("");
   const [otpRole, setOtpRole] = useState<"farmer" | "buyer">("farmer");
   const [isSendingOtp, setIsSendingOtp] = useState(false);
+  const [emailDispatched, setEmailDispatched] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(0);
+
+  useEffect(() => {
+    if (resendCooldown > 0) {
+      const timer = setTimeout(() => setResendCooldown(resendCooldown - 1), 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [resendCooldown]);
 
   const handleLogin = async () => {
     if (isLoggingIn) return;
@@ -676,19 +702,41 @@ export default function App() {
     try {
       const loggedUser = await signInWithGoogle();
       if (!loggedUser) {
-        setAuthError("Google Sign-In popup was closed before completing. If you are experiencing browser iframe restrictions, please use One-Click Quick Access or Phone OTP below.");
+        setAuthError("Google Sign-In popup was closed before completing. If you are experiencing browser iframe restrictions, please use Mobile & Email OTP below.");
         return;
       }
+
+      const docRef = doc(db, "users", loggedUser.uid);
+      const docSnap = await getDoc(docRef);
+      if (!docSnap.exists()) {
+        const googleProfile: UserProfile = {
+          name: loggedUser.displayName || (otpRole === "farmer" ? "Kisan User" : "Vyapari User"),
+          phone: loggedUser.phoneNumber || phoneInput || "",
+          email: loggedUser.email || undefined,
+          role: otpRole,
+          language: selectedLanguage,
+          createdAt: serverTimestamp(),
+          walletBalance: otpRole === "farmer" ? 5000 : 0
+        };
+        await safeSetDoc(docRef, googleProfile);
+        setProfile(googleProfile);
+      } else {
+        const existing = docSnap.data() as UserProfile;
+        setProfile(existing);
+      }
+
+      window.history.replaceState({ view: "dashboard" }, "", "");
+      setView("dashboard");
     } catch (err: any) {
       console.warn("Google Sign-In error:", err);
       const code = err?.code || "";
       const msg = err?.message || "";
       if (code === "auth/popup-blocked" || msg.includes("popup-blocked")) {
-        setAuthError("Sign-in popup was blocked by your browser. Please allow popups or use One-Click Quick Access below.");
+        setAuthError("Sign-in popup was blocked by your browser. Please allow popups or use Mobile & Email OTP below.");
       } else if (code === "auth/unauthorized-domain" || msg.includes("unauthorized-domain")) {
-        setAuthError("This preview domain is restricted for OAuth popups. Please use One-Click Quick Access or Phone OTP below.");
+        setAuthError("This preview domain is restricted for OAuth popups. Please use Mobile & Email OTP below.");
       } else {
-        setAuthError("Google Sign-In was restricted in this embedded browser window. Please use One-Click Quick Access or Phone OTP below.");
+        setAuthError("Google Sign-In was restricted in this embedded browser window. Please use Mobile & Email OTP below.");
       }
     } finally {
       setIsLoggingIn(false);
@@ -708,6 +756,7 @@ export default function App() {
           const quickProfile: UserProfile = {
             name: role === "farmer" ? "Ramesh Patel (Farmer)" : "Priya Sharma (Buyer)",
             phone: role === "farmer" ? "+91 98234 56789" : "+91 98765 43210",
+            email: role === "farmer" ? "farmer.demo@agrinet.ai" : "buyer.demo@agrinet.ai",
             role: role,
             language: selectedLanguage,
             createdAt: serverTimestamp(),
@@ -729,23 +778,50 @@ export default function App() {
 
   const handleSendOtp = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!phoneInput || phoneInput.trim().length < 6) {
-      alert("Please enter a valid phone number");
+    setAuthError(null);
+    setOtpSuccessMsg(null);
+
+    const cleanPhone = phoneInput.trim();
+    const cleanEmail = emailInput.trim().toLowerCase();
+
+    if (!cleanPhone || cleanPhone.length < 7) {
+      setAuthError("Please enter a valid mobile number (e.g., +91 98765 43210)");
       return;
     }
+
+    if (!cleanEmail || !cleanEmail.includes("@") || !cleanEmail.includes(".")) {
+      setAuthError("Please enter a valid Gmail / Email address where you'd like to receive your OTP code.");
+      return;
+    }
+
     setIsSendingOtp(true);
-    setAuthError(null);
     try {
       const res = await fetch("/api/send-otp", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: phoneInput.trim() })
+        body: JSON.stringify({
+          phone: cleanPhone,
+          email: cleanEmail,
+          name: phoneName.trim(),
+          role: otpRole
+        })
       });
       const data = await res.json();
+      if (!data.success) {
+        setAuthError(data.error || "Failed to dispatch verification OTP. Please try again.");
+        return;
+      }
       setOtpSent(true);
-      setDemoOtpCode(data.otp || "1234");
+      setEmailDispatched(Boolean(data.emailDispatched));
+      setDemoOtpCode(data.otp || "123456");
+      setResendCooldown(60);
+      if (data.emailDispatched) {
+        setOtpSuccessMsg(`Verification code sent to ${cleanEmail} via Gmail. Please check your inbox & spam folder.`);
+      } else {
+        setOtpSuccessMsg(data.message || `Verification code generated: ${data.otp}`);
+      }
     } catch (e) {
-      setAuthError("Failed to send OTP. Please check your internet connection.");
+      setAuthError("Failed to dispatch OTP. Please check your network connection.");
     } finally {
       setIsSendingOtp(false);
     }
@@ -753,8 +829,9 @@ export default function App() {
 
   const handleVerifyOtp = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!otpInput) {
-      alert("Please enter the OTP");
+    const cleanCode = otpInput.trim();
+    if (!cleanCode || cleanCode.length < 4) {
+      setAuthError("Please enter the verification code sent to your email.");
       return;
     }
     setIsLoggingIn(true);
@@ -763,11 +840,15 @@ export default function App() {
       const res = await fetch("/api/verify-otp", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: phoneInput.trim(), otp: otpInput.trim() })
+        body: JSON.stringify({
+          phone: phoneInput.trim(),
+          email: emailInput.trim().toLowerCase(),
+          otp: cleanCode
+        })
       });
       const data = await res.json();
       if (!data.success) {
-        alert("Invalid OTP code. Please use the demo code: " + (demoOtpCode || "1234"));
+        setAuthError(data.error || "Invalid OTP code. Please check and try again.");
         setIsLoggingIn(false);
         return;
       }
@@ -780,6 +861,7 @@ export default function App() {
           const profileData: UserProfile = {
             name: phoneName.trim() || (otpRole === "farmer" ? "Kisan User" : "Vyapari User"),
             phone: phoneInput.trim(),
+            email: emailInput.trim().toLowerCase(),
             role: otpRole,
             language: selectedLanguage,
             createdAt: serverTimestamp(),
@@ -787,13 +869,16 @@ export default function App() {
           };
           await safeSetDoc(docRef, profileData);
           setProfile(profileData);
+        } else {
+          const existing = docSnap.data() as UserProfile;
+          setProfile(existing);
         }
         window.history.replaceState({ view: "dashboard" }, "", "");
         setView("dashboard");
       }
     } catch (err: any) {
-      console.error("Phone login error:", err);
-      setAuthError("Failed to complete phone login. Please try again.");
+      console.error("OTP login verification error:", err);
+      setAuthError("Failed to complete verification. Please try again.");
     } finally {
       setIsLoggingIn(false);
     }
@@ -803,9 +888,11 @@ export default function App() {
     e.preventDefault();
     if (!user) return;
     const formData = new FormData(e.target as HTMLFormElement);
+    const enteredEmail = (formData.get("email") as string)?.trim() || user.email || emailInput || "";
     const data: UserProfile = {
       name: formData.get("name") as string,
       phone: formData.get("phone") as string,
+      email: enteredEmail || undefined,
       role: formData.get("role") as any,
       language: selectedLanguage,
       createdAt: serverTimestamp(),
@@ -1496,6 +1583,7 @@ export default function App() {
         if (aiResult.action === "NAVIGATE_MARKETPLACE") navigateTo("marketplace");
         if (aiResult.action === "NAVIGATE_PROFILE") navigateTo("profile");
         if (aiResult.action === "NAVIGATE_MESSAGES") navigateTo("messages");
+        if (aiResult.action === "NAVIGATE_GMAIL" || transcript.toLowerCase().includes("gmail") || transcript.toLowerCase().includes("inbox")) navigateTo("gmail");
         if (aiResult.action === "PREDICT_PRICE") {
           if (aiResult.crop) {
             setSelectedCrop(aiResult.crop);
@@ -1608,6 +1696,10 @@ export default function App() {
                 <button onClick={() => navigateTo("dashboard")} className={cn("text-sm font-medium", view === "dashboard" ? "text-emerald-600" : "text-slate-500 hover:text-emerald-600")}>{t('dashboard')}</button>
                 <button onClick={() => navigateTo("marketplace")} className={cn("text-sm font-medium", view === "marketplace" ? "text-emerald-600" : "text-slate-500 hover:text-emerald-600")}>{t('marketplace')}</button>
                 <button onClick={() => navigateTo("messages")} className={cn("text-sm font-medium", view === "messages" ? "text-emerald-600" : "text-slate-500 hover:text-emerald-600")}>{t('messages')}</button>
+                <button onClick={() => navigateTo("gmail")} className={cn("text-sm font-medium flex items-center gap-1.5 transition-colors", view === "gmail" ? "text-emerald-600 font-bold" : "text-slate-500 hover:text-emerald-600")}>
+                  <Mail className="w-4 h-4" />
+                  <span>{t('gmail') || "Gmail"}</span>
+                </button>
                 {profile?.role === "buyer" && (
                   <button onClick={() => navigateTo("orders")} className={cn("text-sm font-medium", view === "orders" ? "text-emerald-600" : "text-slate-500 hover:text-emerald-600")}>{t('orders')}</button>
                 )}
@@ -1663,150 +1755,275 @@ export default function App() {
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -20 }}
-              className="max-w-md mx-auto mt-20"
+              className="max-w-md mx-auto mt-12 mb-12"
             >
-              <Card className="p-8 text-center space-y-6">
-                <div className="w-20 h-20 bg-emerald-100 rounded-full flex items-center justify-center mx-auto">
-                  <Leaf className="w-10 h-10 text-emerald-600" />
+              <Card className="p-8 text-center space-y-6 shadow-xl border-slate-200">
+                <div className="w-16 h-16 bg-emerald-100 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
+                  <Leaf className="w-8 h-8 text-emerald-600" />
                 </div>
                 <div>
-                  <h1 className="text-3xl font-bold text-slate-900">{t('welcome_to_agrinet')}</h1>
-                  <p className="text-slate-500 mt-2">{t('app_description')}</p>
+                  <h1 className="text-2xl font-bold text-slate-900 tracking-tight">{t('welcome_to_agrinet')}</h1>
+                  <p className="text-slate-500 text-sm mt-1">Smart Agriculture Platform for Farmers & Buyers</p>
                 </div>
 
                 {authError && (
-                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-xs text-left flex items-start gap-2">
-                    <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-red-800 text-xs text-left flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
                     <span>{authError}</span>
                   </div>
                 )}
 
-                <Button onClick={handleLogin} disabled={isLoggingIn} className="w-full py-4 text-base font-semibold flex items-center justify-center gap-2">
-                  {isLoggingIn ? <Loader2 className="w-5 h-5 animate-spin mr-2" /> : (
-                    <svg className="w-5 h-5 mr-1" viewBox="0 0 24 24">
-                      <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-                      <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                      <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
-                      <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
-                    </svg>
-                  )}
-                  {t('sign_in_google')}
-                </Button>
-
-                <div className="relative">
-                  <div className="absolute inset-0 flex items-center"><span className="w-full border-t border-slate-200" /></div>
-                  <div className="relative flex justify-center text-xs uppercase">
-                    <span className="bg-white px-2 text-slate-500 font-medium">Instant 1-Click Access</span>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    onClick={() => handleQuickSignIn("farmer")}
-                    disabled={isLoggingIn}
-                    className="p-3 border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 rounded-xl transition-colors flex flex-col items-center justify-center text-center gap-1 cursor-pointer"
-                  >
-                    <span className="text-2xl">🌾</span>
-                    <span className="text-xs font-bold text-emerald-900">Enter as Farmer</span>
-                    <span className="text-[10px] text-emerald-700">Sell Crops & Predict Prices</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => handleQuickSignIn("buyer")}
-                    disabled={isLoggingIn}
-                    className="p-3 border border-blue-300 bg-blue-50 hover:bg-blue-100 rounded-xl transition-colors flex flex-col items-center justify-center text-center gap-1 cursor-pointer"
-                  >
-                    <span className="text-2xl">🛒</span>
-                    <span className="text-xs font-bold text-blue-900">Enter as Buyer</span>
-                    <span className="text-[10px] text-blue-700">Browse & Place Orders</span>
-                  </button>
-                </div>
-
-                <div className="relative">
-                  <div className="absolute inset-0 flex items-center"><span className="w-full border-t border-slate-200" /></div>
-                  <div className="relative flex justify-center text-xs uppercase"><span className="bg-white px-2 text-slate-500">{t('or_continue_with')}</span></div>
-                </div>
-
-                {!showPhoneLogin ? (
-                  <Button variant="outline" className="w-full flex items-center justify-center gap-2" onClick={() => setShowPhoneLogin(true)}>
-                    <Smartphone className="w-4 h-4" />
-                    {t('phone_otp')}
-                  </Button>
-                ) : (
-                  <div className="p-4 border border-slate-200 rounded-xl bg-slate-50 space-y-3 text-left">
-                    <div className="flex justify-between items-center">
-                      <span className="text-xs font-bold text-slate-700 uppercase">Mobile OTP Sign In</span>
-                      <button type="button" onClick={() => setShowPhoneLogin(false)} className="text-xs text-slate-400 hover:text-slate-600">Close</button>
-                    </div>
-
-                    {!otpSent ? (
-                      <form onSubmit={handleSendOtp} className="space-y-3">
-                        <div>
-                          <label className="text-xs font-medium text-slate-600 block mb-1">Your Mobile Number</label>
-                          <Input
-                            type="tel"
-                            placeholder="+91 98765 43210"
-                            value={phoneInput}
-                            onChange={(e) => setPhoneInput(e.target.value)}
-                            required
-                          />
-                        </div>
-                        <div>
-                          <label className="text-xs font-medium text-slate-600 block mb-1">Role</label>
-                          <select
-                            value={otpRole}
-                            onChange={(e) => setOtpRole(e.target.value as any)}
-                            className="w-full text-sm px-3 py-2 border rounded-lg bg-white"
-                          >
-                            <option value="farmer">Farmer (Seller)</option>
-                            <option value="buyer">Buyer (Trader/Consumer)</option>
-                          </select>
-                        </div>
-                        <Button type="submit" disabled={isSendingOtp} className="w-full text-sm py-2">
-                          {isSendingOtp ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
-                          Send OTP Code
-                        </Button>
-                      </form>
-                    ) : (
-                      <form onSubmit={handleVerifyOtp} className="space-y-3">
-                        <div className="p-2 bg-emerald-50 border border-emerald-200 rounded text-emerald-800 text-xs">
-                          OTP code sent to <b>{phoneInput}</b>. Use test OTP: <b>{demoOtpCode}</b>
-                        </div>
-                        <div>
-                          <label className="text-xs font-medium text-slate-600 block mb-1">Your Name (Optional)</label>
-                          <Input
-                            type="text"
-                            placeholder="Enter your name"
-                            value={phoneName}
-                            onChange={(e) => setPhoneName(e.target.value)}
-                          />
-                        </div>
-                        <div>
-                          <label className="text-xs font-medium text-slate-600 block mb-1">Enter 4-Digit OTP</label>
-                          <Input
-                            type="text"
-                            maxLength={4}
-                            placeholder="1234"
-                            value={otpInput}
-                            onChange={(e) => setOtpInput(e.target.value)}
-                            required
-                          />
-                        </div>
-                        <div className="flex gap-2">
-                          <Button type="button" variant="outline" onClick={() => setOtpSent(false)} className="w-1/3 text-xs">
-                            Back
-                          </Button>
-                          <Button type="submit" disabled={isLoggingIn} className="w-2/3 text-sm">
-                            {isLoggingIn ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
-                            Verify & Enter
-                          </Button>
-                        </div>
-                      </form>
-                    )}
+                {otpSuccessMsg && (
+                  <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-900 text-xs text-left flex items-start gap-2">
+                    <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                    <span>{otpSuccessMsg}</span>
                   </div>
                 )}
+
+                {/* Role Switcher */}
+                <div className="text-left">
+                  <label className="text-xs font-semibold text-slate-700 block mb-2">I am signing in as:</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setOtpRole("farmer")}
+                      className={cn(
+                        "p-3 rounded-xl border text-left flex flex-col gap-1 transition-all cursor-pointer",
+                        otpRole === "farmer"
+                          ? "border-emerald-600 bg-emerald-50/80 ring-2 ring-emerald-500/20"
+                          : "border-slate-200 hover:border-slate-300 bg-white"
+                      )}
+                    >
+                      <span className="text-xl">🌾</span>
+                      <span className="text-xs font-bold text-slate-900">Farmer (Kisan)</span>
+                      <span className="text-[10px] text-slate-500">Sell harvests & predict rates</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setOtpRole("buyer")}
+                      className={cn(
+                        "p-3 rounded-xl border text-left flex flex-col gap-1 transition-all cursor-pointer",
+                        otpRole === "buyer"
+                          ? "border-blue-600 bg-blue-50/80 ring-2 ring-blue-500/20"
+                          : "border-slate-200 hover:border-slate-300 bg-white"
+                      )}
+                    >
+                      <span className="text-xl">🛒</span>
+                      <span className="text-xs font-bold text-slate-900">Buyer (Vyapari)</span>
+                      <span className="text-[10px] text-slate-500">Source fresh produce direct</span>
+                    </button>
+                  </div>
+                </div>
+
+                {!otpSent ? (
+                  /* Step 1: Mobile & Email Input */
+                  <form onSubmit={handleSendOtp} className="space-y-4 text-left">
+                    <div>
+                      <label className="text-xs font-semibold text-slate-700 block mb-1">
+                        Mobile Number <span className="text-red-500">*</span>
+                      </label>
+                      <div className="relative">
+                        <Smartphone className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                        <Input
+                          type="tel"
+                          placeholder="+91 98765 43210"
+                          value={phoneInput}
+                          onChange={(e) => setPhoneInput(e.target.value)}
+                          className="pl-9 text-sm"
+                          required
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-semibold text-slate-700 block mb-1">
+                        Gmail / Email Address <span className="text-red-500">*</span>
+                      </label>
+                      <div className="relative">
+                        <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                        <Input
+                          type="email"
+                          placeholder="yourname@gmail.com"
+                          value={emailInput}
+                          onChange={(e) => setEmailInput(e.target.value)}
+                          className="pl-9 text-sm"
+                          required
+                        />
+                      </div>
+                      <p className="text-[11px] text-slate-500 mt-1 flex items-center gap-1">
+                        <span>✉️</span> We dispatch a 6-digit verification OTP to this email via Gmail.
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-semibold text-slate-700 block mb-1">
+                        Your Full Name <span className="text-slate-400 font-normal">(Optional)</span>
+                      </label>
+                      <Input
+                        type="text"
+                        placeholder="e.g. Ramesh Patel"
+                        value={phoneName}
+                        onChange={(e) => setPhoneName(e.target.value)}
+                        className="text-sm"
+                      />
+                    </div>
+
+                    <Button 
+                      type="submit" 
+                      disabled={isSendingOtp} 
+                      className="w-full py-3 text-sm font-semibold flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white shadow-md shadow-emerald-600/20"
+                    >
+                      {isSendingOtp ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin mr-1" />
+                          Sending OTP to Gmail...
+                        </>
+                      ) : (
+                        <>
+                          <Mail className="w-4 h-4 mr-1" />
+                          Send Verification OTP
+                        </>
+                      )}
+                    </Button>
+                  </form>
+                ) : (
+                  /* Step 2: OTP Verification */
+                  <form onSubmit={handleVerifyOtp} className="space-y-4 text-left">
+                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                      <div className="flex items-center justify-between text-xs text-slate-700 font-medium">
+                        <span>Dispatched to:</span>
+                        <span className="font-bold text-emerald-800 truncate max-w-[200px]">{emailInput}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-xs text-slate-500">
+                        <span>Mobile:</span>
+                        <span>{phoneInput}</span>
+                      </div>
+                      {demoOtpCode && (
+                        <div className="mt-2 pt-2 border-t border-slate-200 flex items-center justify-between text-[11px] text-emerald-700 bg-emerald-50/70 p-1.5 rounded">
+                          <span>Preview / Master Code:</span>
+                          <span className="font-mono font-bold text-sm tracking-wider text-emerald-900">{demoOtpCode}</span>
+                        </div>
+                      )}
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-semibold text-slate-700 block mb-1">
+                        Enter 6-Digit Verification Code
+                      </label>
+                      <Input
+                        type="text"
+                        maxLength={6}
+                        placeholder="123456"
+                        value={otpInput}
+                        onChange={(e) => setOtpInput(e.target.value)}
+                        className="text-center font-mono text-xl tracking-[0.3em] font-bold py-3"
+                        required
+                        autoFocus
+                      />
+                    </div>
+
+                    <Button 
+                      type="submit" 
+                      disabled={isLoggingIn} 
+                      className="w-full py-3 text-sm font-semibold flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white shadow-md shadow-emerald-600/20"
+                    >
+                      {isLoggingIn ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin mr-1" />
+                          Verifying & Signing In...
+                        </>
+                      ) : (
+                        <>
+                          <CheckCircle2 className="w-4 h-4 mr-1" />
+                          Verify & Enter AgriNet
+                        </>
+                      )}
+                    </Button>
+
+                    <div className="flex items-center justify-between pt-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setOtpSent(false);
+                          setOtpInput("");
+                          setAuthError(null);
+                        }}
+                        className="text-xs text-slate-500 hover:text-slate-800 underline cursor-pointer"
+                      >
+                        Change Mobile / Email
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={resendCooldown > 0 || isSendingOtp}
+                        onClick={() => handleSendOtp()}
+                        className={cn(
+                          "text-xs font-medium cursor-pointer",
+                          resendCooldown > 0 ? "text-slate-400" : "text-emerald-700 hover:text-emerald-800 underline"
+                        )}
+                      >
+                        {resendCooldown > 0 ? `Resend code in ${resendCooldown}s` : "Resend OTP Code"}
+                      </button>
+                    </div>
+                  </form>
+                )}
+
+                {/* Secondary Fast Access */}
+                <div className="pt-2">
+                  <div className="relative my-4">
+                    <div className="absolute inset-0 flex items-center"><span className="w-full border-t border-slate-200" /></div>
+                    <div className="relative flex justify-center text-[10px] uppercase font-bold tracking-wider">
+                      <span className="bg-white px-3 text-slate-400">Or Instant 1-Click Demo</span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleQuickSignIn("farmer")}
+                      disabled={isLoggingIn}
+                      className="p-2.5 border border-emerald-200 bg-emerald-50/60 hover:bg-emerald-100 rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer text-xs font-semibold text-emerald-900"
+                    >
+                      <span>🌾</span>
+                      <span>Demo Farmer</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleQuickSignIn("buyer")}
+                      disabled={isLoggingIn}
+                      className="p-2.5 border border-blue-200 bg-blue-50/60 hover:bg-blue-100 rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer text-xs font-semibold text-blue-900"
+                    >
+                      <span>🛒</span>
+                      <span>Demo Buyer</span>
+                    </button>
+                  </div>
+
+                  <div className="mt-4 pt-3 border-t border-slate-100">
+                    <p className="text-[11px] text-slate-500 mb-2">Or continue with Google & access Gmail features:</p>
+                    <button
+                      type="button"
+                      onClick={handleLogin}
+                      disabled={isLoggingIn}
+                      className="gsi-material-button w-full shadow-xs"
+                    >
+                      <div className="gsi-material-button-state"></div>
+                      <div className="gsi-material-button-content-wrapper">
+                        <div className="gsi-material-button-icon">
+                          <svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" style={{ display: 'block' }}>
+                            <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path>
+                            <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"></path>
+                            <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"></path>
+                            <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"></path>
+                            <path fill="none" d="M0 0h48v48H0z"></path>
+                          </svg>
+                        </div>
+                        <span className="gsi-material-button-contents text-slate-800 text-xs font-semibold">
+                          {isLoggingIn ? "Signing in with Google..." : "Sign in with Google & Gmail"}
+                        </span>
+                      </div>
+                    </button>
+                  </div>
+                </div>
               </Card>
             </motion.div>
           )}
@@ -1827,7 +2044,11 @@ export default function App() {
                   </div>
                   <div>
                     <label className="text-sm font-medium mb-1 block">{t('phone_number')}</label>
-                    <Input name="phone" required placeholder={t('phone_placeholder')} />
+                    <Input name="phone" required defaultValue={phoneInput} placeholder={t('phone_placeholder')} />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium mb-1 block">Email Address (Gmail)</label>
+                    <Input name="email" type="email" defaultValue={user.email || emailInput} placeholder="yourname@gmail.com" />
                   </div>
                   <div>
                     <label className="text-sm font-medium mb-1 block">{t('i_am_a')}</label>
@@ -2044,6 +2265,43 @@ export default function App() {
                   </div>
                 </Card>
               </div>
+
+              {/* Gmail Agri-Hub Quick Banner */}
+              <Card className="p-5 bg-gradient-to-r from-red-500/10 via-amber-500/10 to-emerald-500/10 border-slate-200">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 rounded-2xl bg-white text-red-600 shadow-sm flex items-center justify-center">
+                      <Mail className="w-6 h-6" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h4 className="text-base font-bold text-slate-900">Gmail Agricultural Integration</h4>
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">Ready</span>
+                      </div>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        Send official trade inquiries, dispatch orders, and sync mandi emails directly from your Gmail.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <Button 
+                      variant="outline" 
+                      className="bg-white hover:bg-slate-50 text-xs font-semibold"
+                      onClick={() => handleOpenGmailWithDraft("", "🌾 Mandi Crop Inquiry - AgriNet AI", "<p>Hello,</p><p>Inquiring about current market rates and crop availability.</p>")}
+                    >
+                      <Send className="w-3.5 h-3.5 mr-1.5" />
+                      Quick Email
+                    </Button>
+                    <Button 
+                      className="bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold"
+                      onClick={() => navigateTo("gmail")}
+                    >
+                      <span>Open Gmail Hub</span>
+                      <ChevronRight className="w-4 h-4 ml-1" />
+                    </Button>
+                  </div>
+                </div>
+              </Card>
 
               {profile.role === "farmer" && (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
@@ -2289,6 +2547,20 @@ export default function App() {
                           <div className="flex gap-2">
                             <Button 
                               variant="outline" 
+                              className="rounded-full w-10 h-10 p-0 text-red-600 hover:bg-red-50 hover:border-red-200"
+                              title="Send Inquiry via Gmail"
+                              onClick={() => {
+                                handleOpenGmailWithDraft(
+                                  "",
+                                  `🌾 AgriNet Inquiry: ${product.name} (${product.crop})`,
+                                  `<p>Hello ${product.authorName},</p><p>I am interested in purchasing your listing <strong>${product.name} (${product.crop})</strong> for ₹${product.price}/kg located in ${product.location}.</p><p>Could you let me know batch quantity and pickup schedule?</p><p>Regards,<br/><strong>${profile?.name || "Buyer"}</strong></p>`
+                                );
+                              }}
+                            >
+                              <Mail className="w-4 h-4" />
+                            </Button>
+                            <Button 
+                              variant="outline" 
                               className="rounded-full w-10 h-10 p-0"
                               onClick={() => {
                                 setChatPartner({
@@ -2374,7 +2646,24 @@ export default function App() {
                           <p className="text-[10px] text-slate-400">{t('discussing')}: {chatPartner.productName}</p>
                         )}
                       </div>
-                      <Button variant="ghost" size="sm" onClick={() => setChatPartner(null)} className="md:hidden">{t('back')}</Button>
+                      <div className="flex items-center gap-2">
+                        <Button 
+                          variant="outline" 
+                          size="sm"
+                          className="text-xs text-red-600 border-red-200 hover:bg-red-50 flex items-center gap-1.5"
+                          onClick={() => {
+                            handleOpenGmailWithDraft(
+                              "",
+                              `🌾 AgriNet Trade Communication: ${chatPartner.name}${chatPartner.productName ? ` - ${chatPartner.productName}` : ""}`,
+                              `<p>Hello ${chatPartner.name},</p><p>Following up on our AgriNet conversation${chatPartner.productName ? ` regarding <strong>${chatPartner.productName}</strong>` : ""}.</p><p>Regards,<br/><strong>${profile?.name || "Farmer"}</strong></p>`
+                            );
+                          }}
+                        >
+                          <Mail className="w-3.5 h-3.5" />
+                          <span className="hidden sm:inline">Email via Gmail</span>
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={() => setChatPartner(null)} className="md:hidden">{t('back')}</Button>
+                      </div>
                     </div>
                     <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50/50">
                       {messages
@@ -2834,11 +3123,28 @@ export default function App() {
                             <Truck className="w-4 h-4" />
                             {order.status === "pending" ? t('awaiting_confirmation') : order.status === "processing" ? t('being_packed') : t('on_the_way')}
                           </div>
-                          {order.paymentStatus === "pending" && order.paymentMethod !== "cod" && (
-                            <Button size="sm" onClick={() => { setLastOrderId(order.id); setShowPaymentSelector(true); }}>
-                              {t('pay_now')}
+                          <div className="flex items-center gap-2">
+                            <Button 
+                              size="sm" 
+                              variant="outline"
+                              className="text-xs text-slate-600 hover:text-emerald-700 flex items-center gap-1"
+                              onClick={() => {
+                                handleOpenGmailWithDraft(
+                                  profile?.email || "",
+                                  `🧾 Order Invoice #${order.id.slice(0, 8)} - AgriNet AI`,
+                                  `<div style="font-family: sans-serif; padding: 18px; border: 1px solid #e2e8f0; border-radius: 8px;"><h2 style="color: #059669;">AgriNet AI Order Invoice</h2><p><strong>Order ID:</strong> #${order.id}</p><p><strong>Status:</strong> ${order.status}</p><p><strong>Total Paid/Payable:</strong> ₹${order.totalAmount}</p><p><strong>Delivery Address:</strong> ${order.address}</p></div>`
+                                );
+                              }}
+                            >
+                              <Mail className="w-3.5 h-3.5" />
+                              <span>Email Receipt</span>
                             </Button>
-                          )}
+                            {order.paymentStatus === "pending" && order.paymentMethod !== "cod" && (
+                              <Button size="sm" onClick={() => { setLastOrderId(order.id); setShowPaymentSelector(true); }}>
+                                {t('pay_now')}
+                              </Button>
+                            )}
+                          </div>
                         </div>
                       </Card>
                     ))}
@@ -2986,6 +3292,29 @@ export default function App() {
                   </div>
                 </div>
               </div>
+            </motion.div>
+          )}
+
+          {view === "gmail" && profile && (
+            <motion.div 
+              key="gmail" 
+              initial={{ opacity: 0, y: 15 }} 
+              animate={{ opacity: 1, y: 0 }} 
+              exit={{ opacity: 0, y: -15 }}
+              className="max-w-6xl mx-auto space-y-6"
+            >
+              <GmailHub 
+                currentUserEmail={profile.email || user?.email || ""} 
+                currentUserName={profile.name || "Farmer"}
+                defaultComposeTo={gmailDraftTo}
+                defaultComposeSubject={gmailDraftSubject}
+                defaultComposeBody={gmailDraftBody}
+                onCloseCompose={() => {
+                  setGmailDraftTo("");
+                  setGmailDraftSubject("");
+                  setGmailDraftBody("");
+                }}
+              />
             </motion.div>
           )}
         </AnimatePresence>

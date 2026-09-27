@@ -13,7 +13,7 @@ export interface QualityAnalysisResult {
 
 export interface VoiceCommandResult {
   text: string;
-  action: "NAVIGATE_DASHBOARD" | "NAVIGATE_MARKETPLACE" | "NAVIGATE_PROFILE" | "NAVIGATE_MESSAGES" | "PREDICT_PRICE" | "ANALYZE_QUALITY" | "NONE";
+  action: "NAVIGATE_DASHBOARD" | "NAVIGATE_MARKETPLACE" | "NAVIGATE_PROFILE" | "NAVIGATE_MESSAGES" | "NAVIGATE_GMAIL" | "PREDICT_PRICE" | "ANALYZE_QUALITY" | "NONE";
   crop?: string;
   quantity?: number;
 }

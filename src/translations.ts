@@ -20,6 +20,7 @@ export const translations: Record<LanguageCode, Record<string, string>> = {
     orders: "Orders",
     wallet: "Wallet",
     admin: "Admin",
+    gmail: "Gmail",
     logout: "Logout",
     welcome: "Welcome back",
     select_language: "Select your preferred language",

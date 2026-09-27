@@ -5,8 +5,24 @@ import dotenv from "dotenv";
 import Razorpay from "razorpay";
 import crypto from "crypto";
 import { GoogleGenAI, Type } from "@google/genai";
+import nodemailer from "nodemailer";
 
 dotenv.config();
+
+function getMailTransporter() {
+  const user = process.env.GMAIL_USER;
+  const pass = process.env.GMAIL_APP_PASSWORD;
+  if (user && pass) {
+    return nodemailer.createTransport({
+      service: "gmail",
+      auth: {
+        user,
+        pass,
+      },
+    });
+  }
+  return null;
+}
 
 let razorpayInstance: Razorpay | null = null;
 
@@ -87,6 +103,9 @@ function getFallbackVoiceCommand(command: string = "", context: any = {}) {
   } else if (lower.includes("profile") || lower.includes("account")) {
     action = "NAVIGATE_PROFILE";
     text = "Opening your profile settings.";
+  } else if (lower.includes("gmail") || lower.includes("email") || lower.includes("mail") || lower.includes("inbox")) {
+    action = "NAVIGATE_GMAIL";
+    text = "Opening your Gmail Hub.";
   }
 
   const crops = ["wheat", "rice", "tomato", "potato", "onion", "soybean", "cotton", "corn"];
@@ -112,21 +131,162 @@ async function startServer() {
   app.use(express.json({ limit: '15mb' }));
 
   // API Routes
-  const otpStore: Record<string, string> = {};
+  interface OtpRecord {
+    otp: string;
+    email: string;
+    phone: string;
+    name?: string;
+    role?: string;
+    createdAt: number;
+    expiresAt: number;
+  }
 
-  app.post("/api/send-otp", (req, res) => {
-    const { phone } = req.body;
-    const otp = "1234"; // Mock OTP
-    otpStore[phone] = otp;
-    res.json({ msg: "OTP sent", otp });
+  const otpStore: Record<string, OtpRecord> = {};
+
+  app.post("/api/send-otp", async (req, res) => {
+    try {
+      const { phone, email, name, role } = req.body;
+      const normalizedEmail = (email || "").trim().toLowerCase();
+      const normalizedPhone = (phone || "").trim();
+
+      if (!normalizedPhone && !normalizedEmail) {
+        return res.status(400).json({ success: false, error: "Mobile number or email is required" });
+      }
+
+      // Generate a 6-digit verification code
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      const now = Date.now();
+      const record: OtpRecord = {
+        otp,
+        email: normalizedEmail,
+        phone: normalizedPhone,
+        name: name?.trim() || "",
+        role: role || "farmer",
+        createdAt: now,
+        expiresAt: now + 10 * 60 * 1000 // 10 minutes
+      };
+
+      if (normalizedEmail) {
+        otpStore[normalizedEmail] = record;
+      }
+      if (normalizedPhone) {
+        otpStore[normalizedPhone] = record;
+      }
+
+      const transporter = getMailTransporter();
+      let emailDispatched = false;
+      let dispatchError = "";
+
+      if (transporter && normalizedEmail) {
+        try {
+          await transporter.sendMail({
+            from: `"AgriNet AI" <${process.env.GMAIL_USER}>`,
+            to: normalizedEmail,
+            subject: `🌾 Your AgriNet AI Verification Code: ${otp}`,
+            html: `
+              <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 540px; margin: 0 auto; padding: 28px 24px; border: 1px solid #e2e8f0; border-radius: 16px; background-color: #ffffff;">
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 20px;">
+                  <span style="font-size: 28px;">🌾</span>
+                  <h1 style="color: #065f46; margin: 0; font-size: 22px; font-weight: 700;">AgriNet AI</h1>
+                </div>
+                <p style="color: #334155; font-size: 15px; line-height: 1.6; margin-bottom: 12px;">
+                  Hello${record.name ? ` <strong>${record.name}</strong>` : ""},
+                </p>
+                <p style="color: #334155; font-size: 15px; line-height: 1.6; margin-bottom: 20px;">
+                  Your one-time verification code to sign into <strong>AgriNet AI</strong> is:
+                </p>
+                <div style="background-color: #ecfdf5; border: 2px dashed #059669; border-radius: 12px; padding: 18px; text-align: center; margin: 20px 0;">
+                  <span style="font-size: 34px; font-weight: 800; letter-spacing: 8px; color: #047857; display: inline-block;">${otp}</span>
+                </div>
+                <div style="background-color: #f8fafc; border-radius: 8px; padding: 12px 16px; margin: 20px 0; font-size: 13px; color: #64748b;">
+                  <p style="margin: 4px 0;">📱 <strong>Registered Mobile:</strong> ${normalizedPhone || "Provided"}</p>
+                  <p style="margin: 4px 0;">⏱️ <strong>Valid for:</strong> 10 minutes</p>
+                  <p style="margin: 4px 0;">🔒 <strong>Security:</strong> Never share this code with anyone.</p>
+                </div>
+                <p style="color: #94a3b8; font-size: 12px; line-height: 1.5; margin-top: 24px; border-top: 1px solid #f1f5f9; padding-top: 16px; text-align: center;">
+                  AgriNet AI • Empowering Farmers with AI Market Intelligence & Direct Buyer Access
+                </p>
+              </div>
+            `
+          });
+          emailDispatched = true;
+          console.log(`[AgriNet Mail] Verification OTP email dispatched to ${normalizedEmail}`);
+        } catch (mailErr: any) {
+          console.error("[AgriNet Mail] Failed to dispatch email via Gmail:", mailErr);
+          dispatchError = mailErr?.message || "Gmail delivery failed";
+        }
+      }
+
+      return res.json({
+        success: true,
+        emailDispatched,
+        email: normalizedEmail,
+        phone: normalizedPhone,
+        hasGmailConfigured: !!transporter,
+        // Always provide the generated OTP in response so users can test immediately even without configured SMTP credentials
+        otp,
+        message: emailDispatched
+          ? `Verification OTP sent to ${normalizedEmail}`
+          : (transporter && dispatchError
+            ? `Gmail error: ${dispatchError}. Test code: ${otp}`
+            : `Verification code generated. Test code: ${otp}`)
+      });
+    } catch (err: any) {
+      console.error("Error in /api/send-otp:", err);
+      return res.status(500).json({ success: false, error: err?.message || "Failed to process OTP request" });
+    }
   });
 
   app.post("/api/verify-otp", (req, res) => {
-    const { phone, otp } = req.body;
-    if (otpStore[phone] === otp) {
-      res.json({ success: true });
-    } else {
-      res.json({ success: false });
+    try {
+      const { phone, email, otp } = req.body;
+      const normalizedEmail = (email || "").trim().toLowerCase();
+      const normalizedPhone = (phone || "").trim();
+      const code = (otp || "").trim();
+
+      if (!code) {
+        return res.status(400).json({ success: false, error: "OTP code is required" });
+      }
+
+      // Universal master demo codes for testing
+      if (code === "1234" || code === "123456") {
+        return res.json({
+          success: true,
+          email: normalizedEmail,
+          phone: normalizedPhone,
+          isMasterDemo: true
+        });
+      }
+
+      const record = (normalizedEmail && otpStore[normalizedEmail]) ||
+                     (normalizedPhone && otpStore[normalizedPhone]);
+
+      if (!record) {
+        return res.status(400).json({ success: false, error: "No pending verification code found. Please request a new OTP." });
+      }
+
+      if (Date.now() > record.expiresAt) {
+        return res.status(400).json({ success: false, error: "Verification code has expired. Please request a new one." });
+      }
+
+      if (record.otp !== code) {
+        return res.status(400).json({ success: false, error: "Invalid verification code. Please check and try again." });
+      }
+
+      // Cleanup
+      if (normalizedEmail) delete otpStore[normalizedEmail];
+      if (normalizedPhone) delete otpStore[normalizedPhone];
+
+      return res.json({
+        success: true,
+        email: record.email,
+        phone: record.phone,
+        name: record.name,
+        role: record.role
+      });
+    } catch (err: any) {
+      console.error("Error in /api/verify-otp:", err);
+      return res.status(500).json({ success: false, error: err?.message || "Failed to verify OTP" });
     }
   });
 
@@ -285,11 +445,12 @@ App Capabilities:
 - Marketplace: Buying and selling crops.
 - Profile: User settings and role management.
 - Messages: Chatting with farmers or buyers about products.
+- Gmail: Official agricultural emails, invoices, and trade correspondence.
 - Price Prediction: AI-driven market price forecasting.
 - Quality Analysis: Camera-based crop health and grade checking.
 
 Instructions:
-1. Navigate actions: "NAVIGATE_DASHBOARD", "NAVIGATE_MARKETPLACE", "NAVIGATE_PROFILE", "NAVIGATE_MESSAGES"
+1. Navigate actions: "NAVIGATE_DASHBOARD", "NAVIGATE_MARKETPLACE", "NAVIGATE_PROFILE", "NAVIGATE_MESSAGES", "NAVIGATE_GMAIL"
 2. Price check: "PREDICT_PRICE"
 3. Quality check: "ANALYZE_QUALITY"
 4. Other: "NONE"
@@ -308,7 +469,7 @@ Return JSON with:
                 text: { type: Type.STRING },
                 action: { 
                   type: Type.STRING,
-                  enum: ["NAVIGATE_DASHBOARD", "NAVIGATE_MARKETPLACE", "NAVIGATE_PROFILE", "NAVIGATE_MESSAGES", "PREDICT_PRICE", "ANALYZE_QUALITY", "NONE"]
+                  enum: ["NAVIGATE_DASHBOARD", "NAVIGATE_MARKETPLACE", "NAVIGATE_PROFILE", "NAVIGATE_MESSAGES", "NAVIGATE_GMAIL", "PREDICT_PRICE", "ANALYZE_QUALITY", "NONE"]
                 },
                 crop: { type: Type.STRING },
                 quantity: { type: Type.NUMBER }
