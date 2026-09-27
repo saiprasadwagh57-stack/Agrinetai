@@ -6,6 +6,8 @@ import {
   signInQuickAccess,
   signUpWithEmailPassword,
   logInWithEmailPassword,
+  signOutUser,
+  subscribeToAuth,
   handleFirestoreError,
   OperationType
 } from "./firebase";
@@ -382,7 +384,7 @@ export default function App() {
     try {
       handleFirestoreError(err, op, path);
     } catch (e) {
-      setAsyncError(e as Error);
+      console.warn(`Firestore operation ${op} notice at ${path}:`, e);
     }
   };
 
@@ -507,25 +509,67 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (u) => {
+    const unsubscribe = subscribeToAuth(async (u) => {
       setUser(u);
       if (u) {
-        const docRef = doc(db, "users", u.uid);
-        const docSnap = await getDoc(docRef);
-        if (docSnap.exists()) {
-          const profileData = docSnap.data() as UserProfile;
+        let profileData: UserProfile | null = null;
+        try {
+          const docRef = doc(db, "users", u.uid);
+          const docSnap = await getDoc(docRef);
+          if (docSnap.exists()) {
+            profileData = docSnap.data() as UserProfile;
+          }
+        } catch (fetchErr) {
+          console.warn("Profile fetch notice:", fetchErr);
+        }
+
+        if (!profileData) {
+          try {
+            const cached = localStorage.getItem("agrinet_user_profile_" + u.uid);
+            if (cached) {
+              profileData = JSON.parse(cached);
+            } else {
+              const users = JSON.parse(localStorage.getItem("agrinet_users") || "{}");
+              if (u.email && users[u.email]) {
+                const rec = users[u.email];
+                profileData = {
+                  name: rec.name || u.displayName || "AgriNet User",
+                  phone: rec.phone || "",
+                  email: rec.email || u.email,
+                  role: rec.role || "farmer",
+                  language: selectedLanguage,
+                  createdAt: serverTimestamp(),
+                  walletBalance: rec.role === "farmer" ? 5000 : 0
+                };
+              }
+            }
+          } catch (cacheErr) {}
+        }
+
+        if (profileData) {
           setProfile(profileData);
           if (profileData.language) {
             setSelectedLanguage(profileData.language);
-          } else {
-            setShowLanguageModal(true);
           }
-          // Initialize history with dashboard as the root
           window.history.replaceState({ view: "dashboard" }, "", "");
           setView("dashboard");
         } else {
-          setShowLanguageModal(true); // Ask for language first
-          navigateTo("profile"); // Setup profile
+          const defaultProfile: UserProfile = {
+            name: u.displayName || (u.email ? u.email.split("@")[0] : "AgriNet User"),
+            phone: u.phoneNumber || "",
+            email: u.email || "",
+            role: "farmer",
+            language: selectedLanguage,
+            createdAt: serverTimestamp(),
+            walletBalance: 5000
+          };
+          setProfile(defaultProfile);
+          try {
+            localStorage.setItem("agrinet_user_profile_" + u.uid, JSON.stringify(defaultProfile));
+            await safeSetDoc(doc(db, "users", u.uid), defaultProfile);
+          } catch {}
+          window.history.replaceState({ view: "dashboard" }, "", "");
+          setView("dashboard");
         }
       } else {
         setView("auth");
@@ -732,7 +776,7 @@ export default function App() {
 
     setIsLoggingIn(true);
     try {
-      const newUser = await signUpWithEmailPassword(email, password, name);
+      const newUser = await signUpWithEmailPassword(email, password, name, phone, signUpRole);
       if (newUser) {
         const docRef = doc(db, "users", newUser.uid);
         const profileData: UserProfile = {
@@ -756,6 +800,10 @@ export default function App() {
         } catch (storageErr) {
           console.warn("Storage warning:", storageErr);
         }
+
+        try {
+          localStorage.setItem("agrinet_user_profile_" + newUser.uid, JSON.stringify(profileData));
+        } catch {}
 
         // Set login form with registered email and switch to login tab as requested
         setLoginIdentifier(email);
@@ -818,16 +866,20 @@ export default function App() {
 
       const loggedUser = await logInWithEmailPassword(resolvedEmail, password);
       if (loggedUser) {
-        const docRef = doc(db, "users", loggedUser.uid);
-        const docSnap = await getDoc(docRef);
-        if (docSnap.exists()) {
-          const profileData = docSnap.data() as UserProfile;
-          setProfile(profileData);
-        } else {
+        let profileData: UserProfile | null = null;
+        try {
+          const docRef = doc(db, "users", loggedUser.uid);
+          const docSnap = await getDoc(docRef);
+          if (docSnap.exists()) {
+            profileData = docSnap.data() as UserProfile;
+          }
+        } catch {}
+
+        if (!profileData) {
           const userRole = foundRecord?.role || "farmer";
           const userName = loggedUser.displayName || foundRecord?.name || "AgriNet User";
           const userPhone = foundRecord?.phone || identifier;
-          const newProfile: UserProfile = {
+          profileData = {
             name: userName,
             phone: userPhone,
             email: resolvedEmail,
@@ -836,9 +888,14 @@ export default function App() {
             createdAt: serverTimestamp(),
             walletBalance: userRole === "farmer" ? 5000 : 0
           };
-          await safeSetDoc(docRef, newProfile);
-          setProfile(newProfile);
+          await safeSetDoc(doc(db, "users", loggedUser.uid), profileData);
         }
+
+        try {
+          localStorage.setItem("agrinet_user_profile_" + loggedUser.uid, JSON.stringify(profileData));
+        } catch {}
+
+        setProfile(profileData);
         window.history.replaceState({ view: "dashboard" }, "", "");
         setView("dashboard");
       }
@@ -902,23 +959,35 @@ export default function App() {
     setIsLoggingIn(true);
     setAuthError(null);
     try {
-      const u = await signInQuickAccess();
+      const u = await signInQuickAccess(role);
       if (u) {
         const docRef = doc(db, "users", u.uid);
-        const docSnap = await getDoc(docRef);
-        if (!docSnap.exists()) {
-          const quickProfile: UserProfile = {
-            name: role === "farmer" ? "Ramesh Patel (Farmer)" : "Priya Sharma (Buyer)",
-            phone: role === "farmer" ? "+91 98234 56789" : "+91 98765 43210",
-            email: role === "farmer" ? "farmer.demo@agrinet.ai" : "buyer.demo@agrinet.ai",
-            role: role,
-            language: selectedLanguage,
-            createdAt: serverTimestamp(),
-            walletBalance: role === "farmer" ? 24500 : 0
-          };
+        let quickProfile: UserProfile = {
+          name: role === "farmer" ? "Ramesh Patel (Farmer)" : "Priya Sharma (Buyer)",
+          phone: role === "farmer" ? "+91 98234 56789" : "+91 98765 43210",
+          email: role === "farmer" ? "farmer.demo@agrinet.ai" : "buyer.demo@agrinet.ai",
+          role: role,
+          language: selectedLanguage,
+          createdAt: serverTimestamp(),
+          walletBalance: role === "farmer" ? 24500 : 0
+        };
+
+        try {
+          const docSnap = await getDoc(docRef);
+          if (docSnap.exists()) {
+            quickProfile = docSnap.data() as UserProfile;
+          } else {
+            await safeSetDoc(docRef, quickProfile);
+          }
+        } catch {
           await safeSetDoc(docRef, quickProfile);
-          setProfile(quickProfile);
         }
+
+        try {
+          localStorage.setItem("agrinet_user_profile_" + u.uid, JSON.stringify(quickProfile));
+        } catch {}
+
+        setProfile(quickProfile);
         window.history.replaceState({ view: "dashboard" }, "", "");
         setView("dashboard");
       }
@@ -1784,7 +1853,7 @@ export default function App() {
                     <p className="text-sm font-semibold">{profile?.name || t('user_label')}</p>
                     <p className="text-xs text-slate-500 capitalize">{profile?.role || t('member_label')}</p>
                   </div>
-                  <button onClick={() => signOut(auth)} className="p-2 hover:bg-slate-100 rounded-full text-slate-500">
+                  <button onClick={() => signOutUser()} className="p-2 hover:bg-slate-100 rounded-full text-slate-500" title="Log Out">
                   <LogOut className="w-5 h-5" />
                 </button>
               </div>
