@@ -14,8 +14,17 @@ export const signInWithGoogle = async () => {
   try {
     const result = await signInWithPopup(auth, googleProvider);
     return result.user;
-  } catch (error) {
-    console.error("Error signing in with Google", error);
+  } catch (error: any) {
+    if (
+      error?.code === 'auth/cancelled-popup-request' ||
+      error?.code === 'auth/popup-closed-by-user' ||
+      error?.message?.includes('cancelled-popup-request') ||
+      error?.message?.includes('popup-closed-by-user')
+    ) {
+      // User closed or superseded the sign-in popup. This is an intentional cancellation, not a system failure.
+      return null;
+    }
+    console.error("Error signing in with Google Firebase:", error);
     throw error;
   }
 };

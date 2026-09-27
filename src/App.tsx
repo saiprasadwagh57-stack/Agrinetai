@@ -657,11 +657,29 @@ export default function App() {
     }
   }, [user, view]);
 
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+
   const handleLogin = async () => {
+    if (isLoggingIn) return;
+    setIsLoggingIn(true);
     try {
-      await signInWithGoogle();
-    } catch (err) {
+      const loggedUser = await signInWithGoogle();
+      if (!loggedUser) {
+        // Sign-in was dismissed/cancelled by user
+        return;
+      }
+    } catch (err: any) {
+      if (
+        err?.code === 'auth/cancelled-popup-request' ||
+        err?.code === 'auth/popup-closed-by-user' ||
+        err?.message?.includes('cancelled-popup-request') ||
+        err?.message?.includes('popup-closed-by-user')
+      ) {
+        return;
+      }
       alert(t('login_failed'));
+    } finally {
+      setIsLoggingIn(false);
     }
   };
 
@@ -1539,7 +1557,8 @@ export default function App() {
                   <h1 className="text-3xl font-bold text-slate-900">{t('welcome_to_agrinet')}</h1>
                   <p className="text-slate-500 mt-2">{t('app_description')}</p>
                 </div>
-                <Button onClick={handleLogin} className="w-full py-4 text-lg">
+                <Button onClick={handleLogin} disabled={isLoggingIn} className="w-full py-4 text-lg">
+                  {isLoggingIn ? <Loader2 className="w-5 h-5 animate-spin mr-2 inline" /> : null}
                   {t('sign_in_google')}
                 </Button>
                 <div className="relative">
