@@ -3,6 +3,7 @@ import {
   auth, 
   db, 
   signInWithGoogle, 
+  signInQuickAccess,
   handleFirestoreError,
   OperationType
 } from "./firebase";
@@ -658,26 +659,141 @@ export default function App() {
   }, [user, view]);
 
   const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [showPhoneLogin, setShowPhoneLogin] = useState(false);
+  const [phoneInput, setPhoneInput] = useState("");
+  const [otpInput, setOtpInput] = useState("");
+  const [otpSent, setOtpSent] = useState(false);
+  const [demoOtpCode, setDemoOtpCode] = useState("");
+  const [phoneName, setPhoneName] = useState("");
+  const [otpRole, setOtpRole] = useState<"farmer" | "buyer">("farmer");
+  const [isSendingOtp, setIsSendingOtp] = useState(false);
 
   const handleLogin = async () => {
     if (isLoggingIn) return;
     setIsLoggingIn(true);
+    setAuthError(null);
     try {
       const loggedUser = await signInWithGoogle();
       if (!loggedUser) {
-        // Sign-in was dismissed/cancelled by user
+        setAuthError("Google Sign-In popup was closed before completing. If you are experiencing browser iframe restrictions, please use One-Click Quick Access or Phone OTP below.");
         return;
       }
     } catch (err: any) {
-      if (
-        err?.code === 'auth/cancelled-popup-request' ||
-        err?.code === 'auth/popup-closed-by-user' ||
-        err?.message?.includes('cancelled-popup-request') ||
-        err?.message?.includes('popup-closed-by-user')
-      ) {
+      console.warn("Google Sign-In error:", err);
+      const code = err?.code || "";
+      const msg = err?.message || "";
+      if (code === "auth/popup-blocked" || msg.includes("popup-blocked")) {
+        setAuthError("Sign-in popup was blocked by your browser. Please allow popups or use One-Click Quick Access below.");
+      } else if (code === "auth/unauthorized-domain" || msg.includes("unauthorized-domain")) {
+        setAuthError("This preview domain is restricted for OAuth popups. Please use One-Click Quick Access or Phone OTP below.");
+      } else {
+        setAuthError("Google Sign-In was restricted in this embedded browser window. Please use One-Click Quick Access or Phone OTP below.");
+      }
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleQuickSignIn = async (role: "farmer" | "buyer") => {
+    if (isLoggingIn) return;
+    setIsLoggingIn(true);
+    setAuthError(null);
+    try {
+      const u = await signInQuickAccess();
+      if (u) {
+        const docRef = doc(db, "users", u.uid);
+        const docSnap = await getDoc(docRef);
+        if (!docSnap.exists()) {
+          const quickProfile: UserProfile = {
+            name: role === "farmer" ? "Ramesh Patel (Farmer)" : "Priya Sharma (Buyer)",
+            phone: role === "farmer" ? "+91 98234 56789" : "+91 98765 43210",
+            role: role,
+            language: selectedLanguage,
+            createdAt: serverTimestamp(),
+            walletBalance: role === "farmer" ? 24500 : 0
+          };
+          await safeSetDoc(docRef, quickProfile);
+          setProfile(quickProfile);
+        }
+        window.history.replaceState({ view: "dashboard" }, "", "");
+        setView("dashboard");
+      }
+    } catch (err: any) {
+      console.error("Quick sign-in error:", err);
+      setAuthError("Quick sign-in could not be completed. Please try again.");
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleSendOtp = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!phoneInput || phoneInput.trim().length < 6) {
+      alert("Please enter a valid phone number");
+      return;
+    }
+    setIsSendingOtp(true);
+    setAuthError(null);
+    try {
+      const res = await fetch("/api/send-otp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone: phoneInput.trim() })
+      });
+      const data = await res.json();
+      setOtpSent(true);
+      setDemoOtpCode(data.otp || "1234");
+    } catch (e) {
+      setAuthError("Failed to send OTP. Please check your internet connection.");
+    } finally {
+      setIsSendingOtp(false);
+    }
+  };
+
+  const handleVerifyOtp = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!otpInput) {
+      alert("Please enter the OTP");
+      return;
+    }
+    setIsLoggingIn(true);
+    setAuthError(null);
+    try {
+      const res = await fetch("/api/verify-otp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone: phoneInput.trim(), otp: otpInput.trim() })
+      });
+      const data = await res.json();
+      if (!data.success) {
+        alert("Invalid OTP code. Please use the demo code: " + (demoOtpCode || "1234"));
+        setIsLoggingIn(false);
         return;
       }
-      alert(t('login_failed'));
+
+      const u = await signInQuickAccess();
+      if (u) {
+        const docRef = doc(db, "users", u.uid);
+        const docSnap = await getDoc(docRef);
+        if (!docSnap.exists()) {
+          const profileData: UserProfile = {
+            name: phoneName.trim() || (otpRole === "farmer" ? "Kisan User" : "Vyapari User"),
+            phone: phoneInput.trim(),
+            role: otpRole,
+            language: selectedLanguage,
+            createdAt: serverTimestamp(),
+            walletBalance: otpRole === "farmer" ? 5000 : 0
+          };
+          await safeSetDoc(docRef, profileData);
+          setProfile(profileData);
+        }
+        window.history.replaceState({ view: "dashboard" }, "", "");
+        setView("dashboard");
+      }
+    } catch (err: any) {
+      console.error("Phone login error:", err);
+      setAuthError("Failed to complete phone login. Please try again.");
     } finally {
       setIsLoggingIn(false);
     }
@@ -1557,17 +1673,140 @@ export default function App() {
                   <h1 className="text-3xl font-bold text-slate-900">{t('welcome_to_agrinet')}</h1>
                   <p className="text-slate-500 mt-2">{t('app_description')}</p>
                 </div>
-                <Button onClick={handleLogin} disabled={isLoggingIn} className="w-full py-4 text-lg">
-                  {isLoggingIn ? <Loader2 className="w-5 h-5 animate-spin mr-2 inline" /> : null}
+
+                {authError && (
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-xs text-left flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <span>{authError}</span>
+                  </div>
+                )}
+
+                <Button onClick={handleLogin} disabled={isLoggingIn} className="w-full py-4 text-base font-semibold flex items-center justify-center gap-2">
+                  {isLoggingIn ? <Loader2 className="w-5 h-5 animate-spin mr-2" /> : (
+                    <svg className="w-5 h-5 mr-1" viewBox="0 0 24 24">
+                      <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                      <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                      <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                      <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+                    </svg>
+                  )}
                   {t('sign_in_google')}
                 </Button>
+
+                <div className="relative">
+                  <div className="absolute inset-0 flex items-center"><span className="w-full border-t border-slate-200" /></div>
+                  <div className="relative flex justify-center text-xs uppercase">
+                    <span className="bg-white px-2 text-slate-500 font-medium">Instant 1-Click Access</span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => handleQuickSignIn("farmer")}
+                    disabled={isLoggingIn}
+                    className="p-3 border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 rounded-xl transition-colors flex flex-col items-center justify-center text-center gap-1 cursor-pointer"
+                  >
+                    <span className="text-2xl">🌾</span>
+                    <span className="text-xs font-bold text-emerald-900">Enter as Farmer</span>
+                    <span className="text-[10px] text-emerald-700">Sell Crops & Predict Prices</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleQuickSignIn("buyer")}
+                    disabled={isLoggingIn}
+                    className="p-3 border border-blue-300 bg-blue-50 hover:bg-blue-100 rounded-xl transition-colors flex flex-col items-center justify-center text-center gap-1 cursor-pointer"
+                  >
+                    <span className="text-2xl">🛒</span>
+                    <span className="text-xs font-bold text-blue-900">Enter as Buyer</span>
+                    <span className="text-[10px] text-blue-700">Browse & Place Orders</span>
+                  </button>
+                </div>
+
                 <div className="relative">
                   <div className="absolute inset-0 flex items-center"><span className="w-full border-t border-slate-200" /></div>
                   <div className="relative flex justify-center text-xs uppercase"><span className="bg-white px-2 text-slate-500">{t('or_continue_with')}</span></div>
                 </div>
-                <Button variant="outline" className="w-full" onClick={() => alert(t('otp_coming_soon'))}>
-                  {t('phone_otp')}
-                </Button>
+
+                {!showPhoneLogin ? (
+                  <Button variant="outline" className="w-full flex items-center justify-center gap-2" onClick={() => setShowPhoneLogin(true)}>
+                    <Smartphone className="w-4 h-4" />
+                    {t('phone_otp')}
+                  </Button>
+                ) : (
+                  <div className="p-4 border border-slate-200 rounded-xl bg-slate-50 space-y-3 text-left">
+                    <div className="flex justify-between items-center">
+                      <span className="text-xs font-bold text-slate-700 uppercase">Mobile OTP Sign In</span>
+                      <button type="button" onClick={() => setShowPhoneLogin(false)} className="text-xs text-slate-400 hover:text-slate-600">Close</button>
+                    </div>
+
+                    {!otpSent ? (
+                      <form onSubmit={handleSendOtp} className="space-y-3">
+                        <div>
+                          <label className="text-xs font-medium text-slate-600 block mb-1">Your Mobile Number</label>
+                          <Input
+                            type="tel"
+                            placeholder="+91 98765 43210"
+                            value={phoneInput}
+                            onChange={(e) => setPhoneInput(e.target.value)}
+                            required
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium text-slate-600 block mb-1">Role</label>
+                          <select
+                            value={otpRole}
+                            onChange={(e) => setOtpRole(e.target.value as any)}
+                            className="w-full text-sm px-3 py-2 border rounded-lg bg-white"
+                          >
+                            <option value="farmer">Farmer (Seller)</option>
+                            <option value="buyer">Buyer (Trader/Consumer)</option>
+                          </select>
+                        </div>
+                        <Button type="submit" disabled={isSendingOtp} className="w-full text-sm py-2">
+                          {isSendingOtp ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+                          Send OTP Code
+                        </Button>
+                      </form>
+                    ) : (
+                      <form onSubmit={handleVerifyOtp} className="space-y-3">
+                        <div className="p-2 bg-emerald-50 border border-emerald-200 rounded text-emerald-800 text-xs">
+                          OTP code sent to <b>{phoneInput}</b>. Use test OTP: <b>{demoOtpCode}</b>
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium text-slate-600 block mb-1">Your Name (Optional)</label>
+                          <Input
+                            type="text"
+                            placeholder="Enter your name"
+                            value={phoneName}
+                            onChange={(e) => setPhoneName(e.target.value)}
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium text-slate-600 block mb-1">Enter 4-Digit OTP</label>
+                          <Input
+                            type="text"
+                            maxLength={4}
+                            placeholder="1234"
+                            value={otpInput}
+                            onChange={(e) => setOtpInput(e.target.value)}
+                            required
+                          />
+                        </div>
+                        <div className="flex gap-2">
+                          <Button type="button" variant="outline" onClick={() => setOtpSent(false)} className="w-1/3 text-xs">
+                            Back
+                          </Button>
+                          <Button type="submit" disabled={isLoggingIn} className="w-2/3 text-sm">
+                            {isLoggingIn ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+                            Verify & Enter
+                          </Button>
+                        </div>
+                      </form>
+                    )}
+                  </div>
+                )}
               </Card>
             </motion.div>
           )}

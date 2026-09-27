@@ -1,5 +1,5 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
+import { getAuth, GoogleAuthProvider, signInWithPopup, signInAnonymously } from 'firebase/auth';
 import { initializeFirestore, collection, doc, getDoc, setDoc, addDoc, onSnapshot, query, orderBy, limit, getDocFromServer } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
@@ -8,7 +8,9 @@ export const auth = getAuth(app);
 export const db = initializeFirestore(app, {
   experimentalForceLongPolling: true,
 }, firebaseConfig.firestoreDatabaseId);
+
 export const googleProvider = new GoogleAuthProvider();
+googleProvider.setCustomParameters({ prompt: 'select_account' });
 
 export const signInWithGoogle = async () => {
   try {
@@ -21,10 +23,20 @@ export const signInWithGoogle = async () => {
       error?.message?.includes('cancelled-popup-request') ||
       error?.message?.includes('popup-closed-by-user')
     ) {
-      // User closed or superseded the sign-in popup. This is an intentional cancellation, not a system failure.
+      // User closed or superseded the sign-in popup.
       return null;
     }
-    console.error("Error signing in with Google Firebase:", error);
+    console.warn("Google sign in warning:", error?.code, error?.message);
+    throw error;
+  }
+};
+
+export const signInQuickAccess = async () => {
+  try {
+    const cred = await signInAnonymously(auth);
+    return cred.user;
+  } catch (error: any) {
+    console.error("Error signing in with quick access:", error);
     throw error;
   }
 };
