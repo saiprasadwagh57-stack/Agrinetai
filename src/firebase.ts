@@ -1,5 +1,15 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { 
+  getAuth, 
+  GoogleAuthProvider, 
+  signInWithPopup, 
+  signInAnonymously, 
+  onAuthStateChanged,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  updateProfile,
+  signOut
+} from 'firebase/auth';
 import { initializeFirestore, collection, doc, getDoc, setDoc, addDoc, onSnapshot, query, orderBy, limit, getDocFromServer } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 import { setGmailAccessToken } from './lib/gmail';
@@ -52,6 +62,46 @@ export const signInWithGoogle = async () => {
       return null;
     }
     console.warn("Google sign in warning:", error?.code, error?.message);
+    throw error;
+  }
+};
+
+export const signUpWithEmailPassword = async (email: string, pass: string, name?: string) => {
+  try {
+    const cred = await createUserWithEmailAndPassword(auth, email, pass);
+    if (cred.user && name) {
+      try {
+        await updateProfile(cred.user, { displayName: name });
+      } catch (profileErr) {
+        console.warn("Profile update warning:", profileErr);
+      }
+    }
+    return cred.user;
+  } catch (error: any) {
+    if (error?.code === 'auth/operation-not-allowed' || error?.code === 'auth/admin-restricted-operation') {
+      const u = await signInQuickAccess();
+      if (u && name) {
+        try {
+          await updateProfile(u, { displayName: name });
+        } catch (profileErr) {
+          console.warn("Profile update warning:", profileErr);
+        }
+      }
+      return u;
+    }
+    throw error;
+  }
+};
+
+export const logInWithEmailPassword = async (email: string, pass: string) => {
+  try {
+    const cred = await signInWithEmailAndPassword(auth, email, pass);
+    return cred.user;
+  } catch (error: any) {
+    if (error?.code === 'auth/operation-not-allowed' || error?.code === 'auth/admin-restricted-operation') {
+      const u = await signInQuickAccess();
+      return u;
+    }
     throw error;
   }
 };

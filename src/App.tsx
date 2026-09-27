@@ -4,6 +4,8 @@ import {
   db, 
   signInWithGoogle, 
   signInQuickAccess,
+  signUpWithEmailPassword,
+  logInWithEmailPassword,
   handleFirestoreError,
   OperationType
 } from "./firebase";
@@ -68,6 +70,9 @@ import {
   Building2,
   Smartphone,
   Mail,
+  Lock,
+  Eye,
+  EyeOff,
   Languages
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
@@ -674,26 +679,183 @@ export default function App() {
     }
   }, [user, view]);
 
+  // Auth state: simple login vs registration
+  const [authTab, setAuthTab] = useState<"login" | "signup">("login");
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [otpSuccessMsg, setOtpSuccessMsg] = useState<string | null>(null);
-  const [phoneInput, setPhoneInput] = useState("");
-  const [emailInput, setEmailInput] = useState("");
-  const [otpInput, setOtpInput] = useState("");
-  const [otpSent, setOtpSent] = useState(false);
-  const [demoOtpCode, setDemoOtpCode] = useState("");
-  const [phoneName, setPhoneName] = useState("");
-  const [otpRole, setOtpRole] = useState<"farmer" | "buyer">("farmer");
-  const [isSendingOtp, setIsSendingOtp] = useState(false);
-  const [emailDispatched, setEmailDispatched] = useState(false);
-  const [resendCooldown, setResendCooldown] = useState(0);
+  const [authSuccessMsg, setAuthSuccessMsg] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (resendCooldown > 0) {
-      const timer = setTimeout(() => setResendCooldown(resendCooldown - 1), 1000);
-      return () => clearTimeout(timer);
+  // Sign up fields: choice as farmer or buyer, only name, email, mob no, and password!
+  const [signUpRole, setSignUpRole] = useState<"farmer" | "buyer">("farmer");
+  const [signUpName, setSignUpName] = useState("");
+  const [signUpEmail, setSignUpEmail] = useState("");
+  const [signUpPhone, setSignUpPhone] = useState("");
+  const [signUpPassword, setSignUpPassword] = useState("");
+  const [showSignUpPassword, setShowSignUpPassword] = useState(false);
+
+  // Login fields: only email or mobile no, and password!
+  const [loginIdentifier, setLoginIdentifier] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
+
+  // Backward compatibility alias for profile setup modal if invoked
+  const phoneInput = signUpPhone;
+  const emailInput = signUpEmail;
+
+  const handleSignUp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError(null);
+    setAuthSuccessMsg(null);
+
+    const name = signUpName.trim();
+    const email = signUpEmail.trim().toLowerCase();
+    const phone = signUpPhone.trim();
+    const password = signUpPassword;
+
+    if (!name || name.length < 2) {
+      setAuthError("Please enter your full name.");
+      return;
     }
-  }, [resendCooldown]);
+    if (!email || !email.includes("@") || !email.includes(".")) {
+      setAuthError("Please enter a valid email address.");
+      return;
+    }
+    const cleanDigits = phone.replace(/\D/g, "");
+    if (!cleanDigits || cleanDigits.length < 10) {
+      setAuthError("Please enter a valid 10-digit mobile number.");
+      return;
+    }
+    if (!password || password.length < 6) {
+      setAuthError("Password must be at least 6 characters.");
+      return;
+    }
+
+    setIsLoggingIn(true);
+    try {
+      const newUser = await signUpWithEmailPassword(email, password, name);
+      if (newUser) {
+        const docRef = doc(db, "users", newUser.uid);
+        const profileData: UserProfile = {
+          name,
+          phone,
+          email,
+          role: signUpRole,
+          language: selectedLanguage,
+          createdAt: serverTimestamp(),
+          walletBalance: signUpRole === "farmer" ? 5000 : 0
+        };
+        await safeSetDoc(docRef, profileData);
+        setProfile(profileData);
+
+        // Store user mapping in localStorage for instant login lookup
+        try {
+          const stored = JSON.parse(localStorage.getItem("agrinet_users") || "{}");
+          stored[email] = { name, phone, email, role: signUpRole, password };
+          stored[cleanDigits] = { name, phone, email, role: signUpRole, password };
+          localStorage.setItem("agrinet_users", JSON.stringify(stored));
+        } catch (storageErr) {
+          console.warn("Storage warning:", storageErr);
+        }
+
+        // Set login form with registered email and switch to login tab as requested
+        setLoginIdentifier(email);
+        setLoginPassword("");
+        setAuthSuccessMsg(`Registration successful for ${name}! Please enter your password to log in.`);
+        setAuthTab("login");
+      }
+    } catch (err: any) {
+      console.error("Sign up error:", err);
+      if (err?.code === "auth/email-already-in-use") {
+        setAuthError("This email is already registered. Please switch to the Login tab.");
+      } else if (err?.code === "auth/weak-password") {
+        setAuthError("Password must be at least 6 characters long.");
+      } else if (err?.code === "auth/invalid-email") {
+        setAuthError("Please enter a valid email address format.");
+      } else {
+        setAuthError(err?.message || "Failed to create account. Please try again.");
+      }
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleEmailPasswordLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError(null);
+    setAuthSuccessMsg(null);
+
+    const identifier = loginIdentifier.trim();
+    const password = loginPassword;
+
+    if (!identifier) {
+      setAuthError("Please enter your email or mobile number.");
+      return;
+    }
+    if (!password) {
+      setAuthError("Please enter your password.");
+      return;
+    }
+
+    setIsLoggingIn(true);
+    try {
+      let resolvedEmail = identifier;
+      const cleanPhone = identifier.replace(/\D/g, "");
+      let foundRecord: any = null;
+      try {
+        const stored = JSON.parse(localStorage.getItem("agrinet_users") || "{}");
+        if (cleanPhone && stored[cleanPhone]) {
+          foundRecord = stored[cleanPhone];
+          resolvedEmail = foundRecord.email;
+        } else if (stored[identifier.toLowerCase()]) {
+          foundRecord = stored[identifier.toLowerCase()];
+          resolvedEmail = foundRecord.email;
+        }
+      } catch (storageErr) {}
+
+      if (!resolvedEmail.includes("@")) {
+        resolvedEmail = `${cleanPhone || identifier}@agrinet.user`;
+      }
+
+      const loggedUser = await logInWithEmailPassword(resolvedEmail, password);
+      if (loggedUser) {
+        const docRef = doc(db, "users", loggedUser.uid);
+        const docSnap = await getDoc(docRef);
+        if (docSnap.exists()) {
+          const profileData = docSnap.data() as UserProfile;
+          setProfile(profileData);
+        } else {
+          const userRole = foundRecord?.role || "farmer";
+          const userName = loggedUser.displayName || foundRecord?.name || "AgriNet User";
+          const userPhone = foundRecord?.phone || identifier;
+          const newProfile: UserProfile = {
+            name: userName,
+            phone: userPhone,
+            email: resolvedEmail,
+            role: userRole,
+            language: selectedLanguage,
+            createdAt: serverTimestamp(),
+            walletBalance: userRole === "farmer" ? 5000 : 0
+          };
+          await safeSetDoc(docRef, newProfile);
+          setProfile(newProfile);
+        }
+        window.history.replaceState({ view: "dashboard" }, "", "");
+        setView("dashboard");
+      }
+    } catch (err: any) {
+      console.error("Login error:", err);
+      const code = err?.code;
+      if (code === "auth/invalid-credential" || code === "auth/wrong-password" || code === "auth/user-not-found") {
+        setAuthError("Invalid credentials. Please verify your email/mobile and password, or Sign Up.");
+      } else if (code === "auth/invalid-email") {
+        setAuthError("Please enter a valid email address.");
+      } else {
+        setAuthError(err?.message || "Failed to log in. Please check your credentials.");
+      }
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
 
   const handleLogin = async () => {
     if (isLoggingIn) return;
@@ -702,7 +864,7 @@ export default function App() {
     try {
       const loggedUser = await signInWithGoogle();
       if (!loggedUser) {
-        setAuthError("Google Sign-In popup was closed before completing. If you are experiencing browser iframe restrictions, please use Mobile & Email OTP below.");
+        setAuthError("Google Sign-In popup was closed before completing.");
         return;
       }
 
@@ -710,13 +872,13 @@ export default function App() {
       const docSnap = await getDoc(docRef);
       if (!docSnap.exists()) {
         const googleProfile: UserProfile = {
-          name: loggedUser.displayName || (otpRole === "farmer" ? "Kisan User" : "Vyapari User"),
-          phone: loggedUser.phoneNumber || phoneInput || "",
+          name: loggedUser.displayName || (signUpRole === "farmer" ? "Kisan User" : "Vyapari User"),
+          phone: loggedUser.phoneNumber || signUpPhone || "",
           email: loggedUser.email || undefined,
-          role: otpRole,
+          role: signUpRole,
           language: selectedLanguage,
           createdAt: serverTimestamp(),
-          walletBalance: otpRole === "farmer" ? 5000 : 0
+          walletBalance: signUpRole === "farmer" ? 5000 : 0
         };
         await safeSetDoc(docRef, googleProfile);
         setProfile(googleProfile);
@@ -729,15 +891,7 @@ export default function App() {
       setView("dashboard");
     } catch (err: any) {
       console.warn("Google Sign-In error:", err);
-      const code = err?.code || "";
-      const msg = err?.message || "";
-      if (code === "auth/popup-blocked" || msg.includes("popup-blocked")) {
-        setAuthError("Sign-in popup was blocked by your browser. Please allow popups or use Mobile & Email OTP below.");
-      } else if (code === "auth/unauthorized-domain" || msg.includes("unauthorized-domain")) {
-        setAuthError("This preview domain is restricted for OAuth popups. Please use Mobile & Email OTP below.");
-      } else {
-        setAuthError("Google Sign-In was restricted in this embedded browser window. Please use Mobile & Email OTP below.");
-      }
+      setAuthError("Google Sign-In was not completed. Please log in with your email and password.");
     } finally {
       setIsLoggingIn(false);
     }
@@ -771,114 +925,6 @@ export default function App() {
     } catch (err: any) {
       console.error("Quick sign-in error:", err);
       setAuthError("Quick sign-in could not be completed. Please try again.");
-    } finally {
-      setIsLoggingIn(false);
-    }
-  };
-
-  const handleSendOtp = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    setAuthError(null);
-    setOtpSuccessMsg(null);
-
-    const cleanPhone = phoneInput.trim();
-    const cleanEmail = emailInput.trim().toLowerCase();
-
-    if (!cleanPhone || cleanPhone.length < 7) {
-      setAuthError("Please enter a valid mobile number (e.g., +91 98765 43210)");
-      return;
-    }
-
-    if (!cleanEmail || !cleanEmail.includes("@") || !cleanEmail.includes(".")) {
-      setAuthError("Please enter a valid Gmail / Email address where you'd like to receive your OTP code.");
-      return;
-    }
-
-    setIsSendingOtp(true);
-    try {
-      const res = await fetch("/api/send-otp", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          phone: cleanPhone,
-          email: cleanEmail,
-          name: phoneName.trim(),
-          role: otpRole
-        })
-      });
-      const data = await res.json();
-      if (!data.success) {
-        setAuthError(data.error || "Failed to dispatch verification OTP. Please try again.");
-        return;
-      }
-      setOtpSent(true);
-      setEmailDispatched(Boolean(data.emailDispatched));
-      setDemoOtpCode(data.otp || "123456");
-      setResendCooldown(60);
-      if (data.emailDispatched) {
-        setOtpSuccessMsg(`Verification code sent to ${cleanEmail} via Gmail. Please check your inbox & spam folder.`);
-      } else {
-        setOtpSuccessMsg(data.message || `Verification code generated: ${data.otp}`);
-      }
-    } catch (e) {
-      setAuthError("Failed to dispatch OTP. Please check your network connection.");
-    } finally {
-      setIsSendingOtp(false);
-    }
-  };
-
-  const handleVerifyOtp = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    const cleanCode = otpInput.trim();
-    if (!cleanCode || cleanCode.length < 4) {
-      setAuthError("Please enter the verification code sent to your email.");
-      return;
-    }
-    setIsLoggingIn(true);
-    setAuthError(null);
-    try {
-      const res = await fetch("/api/verify-otp", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          phone: phoneInput.trim(),
-          email: emailInput.trim().toLowerCase(),
-          otp: cleanCode
-        })
-      });
-      const data = await res.json();
-      if (!data.success) {
-        setAuthError(data.error || "Invalid OTP code. Please check and try again.");
-        setIsLoggingIn(false);
-        return;
-      }
-
-      const u = await signInQuickAccess();
-      if (u) {
-        const docRef = doc(db, "users", u.uid);
-        const docSnap = await getDoc(docRef);
-        if (!docSnap.exists()) {
-          const profileData: UserProfile = {
-            name: phoneName.trim() || (otpRole === "farmer" ? "Kisan User" : "Vyapari User"),
-            phone: phoneInput.trim(),
-            email: emailInput.trim().toLowerCase(),
-            role: otpRole,
-            language: selectedLanguage,
-            createdAt: serverTimestamp(),
-            walletBalance: otpRole === "farmer" ? 5000 : 0
-          };
-          await safeSetDoc(docRef, profileData);
-          setProfile(profileData);
-        } else {
-          const existing = docSnap.data() as UserProfile;
-          setProfile(existing);
-        }
-        window.history.replaceState({ view: "dashboard" }, "", "");
-        setView("dashboard");
-      }
-    } catch (err: any) {
-      console.error("OTP login verification error:", err);
-      setAuthError("Failed to complete verification. Please try again.");
     } finally {
       setIsLoggingIn(false);
     }
@@ -1757,13 +1803,47 @@ export default function App() {
               exit={{ opacity: 0, y: -20 }}
               className="max-w-md mx-auto mt-12 mb-12"
             >
-              <Card className="p-8 text-center space-y-6 shadow-xl border-slate-200">
-                <div className="w-16 h-16 bg-emerald-100 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
-                  <Leaf className="w-8 h-8 text-emerald-600" />
+              <Card className="p-7 sm:p-8 text-center space-y-5 shadow-xl border-slate-200">
+                <div className="w-14 h-14 bg-emerald-100 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
+                  <Leaf className="w-7 h-7 text-emerald-600" />
                 </div>
                 <div>
                   <h1 className="text-2xl font-bold text-slate-900 tracking-tight">{t('welcome_to_agrinet')}</h1>
-                  <p className="text-slate-500 text-sm mt-1">Smart Agriculture Platform for Farmers & Buyers</p>
+                  <p className="text-slate-500 text-xs sm:text-sm mt-1">Smart Agriculture Platform for Farmers & Buyers</p>
+                </div>
+
+                {/* Tab Switcher: Log In vs Sign Up */}
+                <div className="flex p-1 bg-slate-100 rounded-xl">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthTab("login");
+                      setAuthError(null);
+                    }}
+                    className={cn(
+                      "flex-1 py-2 text-xs sm:text-sm font-semibold rounded-lg transition-all cursor-pointer",
+                      authTab === "login"
+                        ? "bg-white text-emerald-900 shadow-xs"
+                        : "text-slate-600 hover:text-slate-900"
+                    )}
+                  >
+                    Log In
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthTab("signup");
+                      setAuthError(null);
+                    }}
+                    className={cn(
+                      "flex-1 py-2 text-xs sm:text-sm font-semibold rounded-lg transition-all cursor-pointer",
+                      authTab === "signup"
+                        ? "bg-white text-emerald-900 shadow-xs"
+                        : "text-slate-600 hover:text-slate-900"
+                    )}
+                  >
+                    Sign Up
+                  </button>
                 </div>
 
                 {authError && (
@@ -1773,51 +1853,228 @@ export default function App() {
                   </div>
                 )}
 
-                {otpSuccessMsg && (
+                {authSuccessMsg && (
                   <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-900 text-xs text-left flex items-start gap-2">
                     <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                    <span>{otpSuccessMsg}</span>
+                    <span>{authSuccessMsg}</span>
                   </div>
                 )}
 
-                {/* Role Switcher */}
-                <div className="text-left">
-                  <label className="text-xs font-semibold text-slate-700 block mb-2">I am signing in as:</label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setOtpRole("farmer")}
-                      className={cn(
-                        "p-3 rounded-xl border text-left flex flex-col gap-1 transition-all cursor-pointer",
-                        otpRole === "farmer"
-                          ? "border-emerald-600 bg-emerald-50/80 ring-2 ring-emerald-500/20"
-                          : "border-slate-200 hover:border-slate-300 bg-white"
-                      )}
-                    >
-                      <span className="text-xl">🌾</span>
-                      <span className="text-xs font-bold text-slate-900">Farmer (Kisan)</span>
-                      <span className="text-[10px] text-slate-500">Sell harvests & predict rates</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setOtpRole("buyer")}
-                      className={cn(
-                        "p-3 rounded-xl border text-left flex flex-col gap-1 transition-all cursor-pointer",
-                        otpRole === "buyer"
-                          ? "border-blue-600 bg-blue-50/80 ring-2 ring-blue-500/20"
-                          : "border-slate-200 hover:border-slate-300 bg-white"
-                      )}
-                    >
-                      <span className="text-xl">🛒</span>
-                      <span className="text-xs font-bold text-slate-900">Buyer (Vyapari)</span>
-                      <span className="text-[10px] text-slate-500">Source fresh produce direct</span>
-                    </button>
-                  </div>
-                </div>
+                {authTab === "login" ? (
+                  /* ================= LOGIN FORM (SIMPLE: ONLY EMAIL/MOB & PASSWORD) ================= */
+                  <form onSubmit={handleEmailPasswordLogin} className="space-y-4 text-left">
+                    <div>
+                      <label className="text-xs font-semibold text-slate-700 block mb-1">
+                        Email or Mobile Number <span className="text-red-500">*</span>
+                      </label>
+                      <div className="relative">
+                        <UserIcon className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                        <Input
+                          type="text"
+                          placeholder="name@email.com or 9876543210"
+                          value={loginIdentifier}
+                          onChange={(e) => setLoginIdentifier(e.target.value)}
+                          className="pl-9 text-sm"
+                          required
+                          autoFocus
+                        />
+                      </div>
+                    </div>
 
-                {!otpSent ? (
-                  /* Step 1: Mobile & Email Input */
-                  <form onSubmit={handleSendOtp} className="space-y-4 text-left">
+                    <div>
+                      <label className="text-xs font-semibold text-slate-700 block mb-1">
+                        Password <span className="text-red-500">*</span>
+                      </label>
+                      <div className="relative">
+                        <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                        <Input
+                          type={showLoginPassword ? "text" : "password"}
+                          placeholder="Enter your password"
+                          value={loginPassword}
+                          onChange={(e) => setLoginPassword(e.target.value)}
+                          className="pl-9 pr-9 text-sm"
+                          required
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowLoginPassword(!showLoginPassword)}
+                          className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-600 cursor-pointer"
+                        >
+                          {showLoginPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    <Button 
+                      type="submit" 
+                      disabled={isLoggingIn} 
+                      className="w-full py-3 text-sm font-semibold flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white shadow-md shadow-emerald-600/20 cursor-pointer"
+                    >
+                      {isLoggingIn ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin mr-1" />
+                          Logging in...
+                        </>
+                      ) : (
+                        "Log In"
+                      )}
+                    </Button>
+
+                    <div className="text-center pt-1">
+                      <p className="text-xs text-slate-600">
+                        Don't have an account?{" "}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAuthTab("signup");
+                            setAuthError(null);
+                          }}
+                          className="text-emerald-700 font-semibold hover:underline cursor-pointer"
+                        >
+                          Sign Up
+                        </button>
+                      </p>
+                    </div>
+
+                    {/* Subtle fast demo & Google SSO */}
+                    <div className="pt-2">
+                      <div className="relative my-3">
+                        <div className="absolute inset-0 flex items-center"><span className="w-full border-t border-slate-200" /></div>
+                        <div className="relative flex justify-center text-[10px] uppercase font-bold tracking-wider">
+                          <span className="bg-white px-3 text-slate-400">Or Instant Demo Access</span>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleQuickSignIn("farmer")}
+                          disabled={isLoggingIn}
+                          className="p-2 border border-emerald-200 bg-emerald-50/60 hover:bg-emerald-100 rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer text-xs font-semibold text-emerald-900"
+                        >
+                          <span>🌾</span>
+                          <span>Demo Farmer</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleQuickSignIn("buyer")}
+                          disabled={isLoggingIn}
+                          className="p-2 border border-blue-200 bg-blue-50/60 hover:bg-blue-100 rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer text-xs font-semibold text-blue-900"
+                        >
+                          <span>🛒</span>
+                          <span>Demo Buyer</span>
+                        </button>
+                      </div>
+
+                      <div className="mt-3">
+                        <button
+                          type="button"
+                          onClick={handleLogin}
+                          disabled={isLoggingIn}
+                          className="gsi-material-button w-full shadow-xs"
+                        >
+                          <div className="gsi-material-button-state"></div>
+                          <div className="gsi-material-button-content-wrapper">
+                            <div className="gsi-material-button-icon">
+                              <svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" style={{ display: 'block' }}>
+                                <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path>
+                                <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"></path>
+                                <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"></path>
+                                <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"></path>
+                                <path fill="none" d="M0 0h48v48H0z"></path>
+                              </svg>
+                            </div>
+                            <span className="gsi-material-button-contents text-slate-800 text-xs font-semibold">
+                              Sign in with Google & Gmail
+                            </span>
+                          </div>
+                        </button>
+                      </div>
+                    </div>
+                  </form>
+                ) : (
+                  /* ================= SIGN UP FORM (CHOICE AS FARMER/BUYER, NAME, EMAIL, MOB NO, PASSWORD) ================= */
+                  <form onSubmit={handleSignUp} className="space-y-4 text-left">
+                    {/* Role Choice: Farmer or Buyer */}
+                    <div>
+                      <label className="text-xs font-semibold text-slate-700 block mb-1.5">
+                        Choose Account Type: <span className="text-red-500">*</span>
+                      </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setSignUpRole("farmer")}
+                          className={cn(
+                            "p-3 rounded-xl border text-left flex flex-col gap-1 transition-all cursor-pointer",
+                            signUpRole === "farmer"
+                              ? "border-emerald-600 bg-emerald-50/90 ring-2 ring-emerald-500/20"
+                              : "border-slate-200 hover:border-slate-300 bg-white"
+                          )}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-xl">🌾</span>
+                            {signUpRole === "farmer" && <span className="w-2 h-2 rounded-full bg-emerald-600" />}
+                          </div>
+                          <span className="text-xs font-bold text-slate-900">Farmer (Kisan)</span>
+                          <span className="text-[10px] text-slate-500 leading-tight">Sell harvests & predict mandi prices</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSignUpRole("buyer")}
+                          className={cn(
+                            "p-3 rounded-xl border text-left flex flex-col gap-1 transition-all cursor-pointer",
+                            signUpRole === "buyer"
+                              ? "border-blue-600 bg-blue-50/90 ring-2 ring-blue-500/20"
+                              : "border-slate-200 hover:border-slate-300 bg-white"
+                          )}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-xl">🛒</span>
+                            {signUpRole === "buyer" && <span className="w-2 h-2 rounded-full bg-blue-600" />}
+                          </div>
+                          <span className="text-xs font-bold text-slate-900">Buyer (Vyapari)</span>
+                          <span className="text-[10px] text-slate-500 leading-tight">Source produce direct from farms</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Name */}
+                    <div>
+                      <label className="text-xs font-semibold text-slate-700 block mb-1">
+                        Full Name <span className="text-red-500">*</span>
+                      </label>
+                      <div className="relative">
+                        <UserIcon className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                        <Input
+                          type="text"
+                          placeholder="e.g. Ramesh Patel"
+                          value={signUpName}
+                          onChange={(e) => setSignUpName(e.target.value)}
+                          className="pl-9 text-sm"
+                          required
+                        />
+                      </div>
+                    </div>
+
+                    {/* Email */}
+                    <div>
+                      <label className="text-xs font-semibold text-slate-700 block mb-1">
+                        Email Address <span className="text-red-500">*</span>
+                      </label>
+                      <div className="relative">
+                        <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                        <Input
+                          type="email"
+                          placeholder="e.g. ramesh@gmail.com"
+                          value={signUpEmail}
+                          onChange={(e) => setSignUpEmail(e.target.value)}
+                          className="pl-9 text-sm"
+                          required
+                        />
+                      </div>
+                    </div>
+
+                    {/* Mobile Number */}
                     <div>
                       <label className="text-xs font-semibold text-slate-700 block mb-1">
                         Mobile Number <span className="text-red-500">*</span>
@@ -1826,204 +2083,72 @@ export default function App() {
                         <Smartphone className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
                         <Input
                           type="tel"
-                          placeholder="+91 98765 43210"
-                          value={phoneInput}
-                          onChange={(e) => setPhoneInput(e.target.value)}
+                          placeholder="e.g. 98765 43210"
+                          value={signUpPhone}
+                          onChange={(e) => setSignUpPhone(e.target.value)}
                           className="pl-9 text-sm"
                           required
                         />
                       </div>
                     </div>
 
+                    {/* Password */}
                     <div>
                       <label className="text-xs font-semibold text-slate-700 block mb-1">
-                        Gmail / Email Address <span className="text-red-500">*</span>
+                        Password <span className="text-red-500">*</span>
                       </label>
                       <div className="relative">
-                        <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                        <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
                         <Input
-                          type="email"
-                          placeholder="yourname@gmail.com"
-                          value={emailInput}
-                          onChange={(e) => setEmailInput(e.target.value)}
-                          className="pl-9 text-sm"
+                          type={showSignUpPassword ? "text" : "password"}
+                          placeholder="Create password (min 6 characters)"
+                          value={signUpPassword}
+                          onChange={(e) => setSignUpPassword(e.target.value)}
+                          className="pl-9 pr-9 text-sm"
                           required
                         />
+                        <button
+                          type="button"
+                          onClick={() => setShowSignUpPassword(!showSignUpPassword)}
+                          className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-600 cursor-pointer"
+                        >
+                          {showSignUpPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
                       </div>
-                      <p className="text-[11px] text-slate-500 mt-1 flex items-center gap-1">
-                        <span>✉️</span> We dispatch a 6-digit verification OTP to this email via Gmail.
-                      </p>
-                    </div>
-
-                    <div>
-                      <label className="text-xs font-semibold text-slate-700 block mb-1">
-                        Your Full Name <span className="text-slate-400 font-normal">(Optional)</span>
-                      </label>
-                      <Input
-                        type="text"
-                        placeholder="e.g. Ramesh Patel"
-                        value={phoneName}
-                        onChange={(e) => setPhoneName(e.target.value)}
-                        className="text-sm"
-                      />
-                    </div>
-
-                    <Button 
-                      type="submit" 
-                      disabled={isSendingOtp} 
-                      className="w-full py-3 text-sm font-semibold flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white shadow-md shadow-emerald-600/20"
-                    >
-                      {isSendingOtp ? (
-                        <>
-                          <Loader2 className="w-4 h-4 animate-spin mr-1" />
-                          Sending OTP to Gmail...
-                        </>
-                      ) : (
-                        <>
-                          <Mail className="w-4 h-4 mr-1" />
-                          Send Verification OTP
-                        </>
-                      )}
-                    </Button>
-                  </form>
-                ) : (
-                  /* Step 2: OTP Verification */
-                  <form onSubmit={handleVerifyOtp} className="space-y-4 text-left">
-                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
-                      <div className="flex items-center justify-between text-xs text-slate-700 font-medium">
-                        <span>Dispatched to:</span>
-                        <span className="font-bold text-emerald-800 truncate max-w-[200px]">{emailInput}</span>
-                      </div>
-                      <div className="flex items-center justify-between text-xs text-slate-500">
-                        <span>Mobile:</span>
-                        <span>{phoneInput}</span>
-                      </div>
-                      {demoOtpCode && (
-                        <div className="mt-2 pt-2 border-t border-slate-200 flex items-center justify-between text-[11px] text-emerald-700 bg-emerald-50/70 p-1.5 rounded">
-                          <span>Preview / Master Code:</span>
-                          <span className="font-mono font-bold text-sm tracking-wider text-emerald-900">{demoOtpCode}</span>
-                        </div>
-                      )}
-                    </div>
-
-                    <div>
-                      <label className="text-xs font-semibold text-slate-700 block mb-1">
-                        Enter 6-Digit Verification Code
-                      </label>
-                      <Input
-                        type="text"
-                        maxLength={6}
-                        placeholder="123456"
-                        value={otpInput}
-                        onChange={(e) => setOtpInput(e.target.value)}
-                        className="text-center font-mono text-xl tracking-[0.3em] font-bold py-3"
-                        required
-                        autoFocus
-                      />
                     </div>
 
                     <Button 
                       type="submit" 
                       disabled={isLoggingIn} 
-                      className="w-full py-3 text-sm font-semibold flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white shadow-md shadow-emerald-600/20"
+                      className="w-full py-3 text-sm font-semibold flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white shadow-md shadow-emerald-600/20 cursor-pointer"
                     >
                       {isLoggingIn ? (
                         <>
                           <Loader2 className="w-4 h-4 animate-spin mr-1" />
-                          Verifying & Signing In...
+                          Creating Account...
                         </>
                       ) : (
-                        <>
-                          <CheckCircle2 className="w-4 h-4 mr-1" />
-                          Verify & Enter AgriNet
-                        </>
+                        "Sign Up & Continue"
                       )}
                     </Button>
 
-                    <div className="flex items-center justify-between pt-1">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setOtpSent(false);
-                          setOtpInput("");
-                          setAuthError(null);
-                        }}
-                        className="text-xs text-slate-500 hover:text-slate-800 underline cursor-pointer"
-                      >
-                        Change Mobile / Email
-                      </button>
-
-                      <button
-                        type="button"
-                        disabled={resendCooldown > 0 || isSendingOtp}
-                        onClick={() => handleSendOtp()}
-                        className={cn(
-                          "text-xs font-medium cursor-pointer",
-                          resendCooldown > 0 ? "text-slate-400" : "text-emerald-700 hover:text-emerald-800 underline"
-                        )}
-                      >
-                        {resendCooldown > 0 ? `Resend code in ${resendCooldown}s` : "Resend OTP Code"}
-                      </button>
+                    <div className="text-center pt-1">
+                      <p className="text-xs text-slate-600">
+                        Already have an account?{" "}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAuthTab("login");
+                            setAuthError(null);
+                          }}
+                          className="text-emerald-700 font-semibold hover:underline cursor-pointer"
+                        >
+                          Go to Login
+                        </button>
+                      </p>
                     </div>
                   </form>
                 )}
-
-                {/* Secondary Fast Access */}
-                <div className="pt-2">
-                  <div className="relative my-4">
-                    <div className="absolute inset-0 flex items-center"><span className="w-full border-t border-slate-200" /></div>
-                    <div className="relative flex justify-center text-[10px] uppercase font-bold tracking-wider">
-                      <span className="bg-white px-3 text-slate-400">Or Instant 1-Click Demo</span>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => handleQuickSignIn("farmer")}
-                      disabled={isLoggingIn}
-                      className="p-2.5 border border-emerald-200 bg-emerald-50/60 hover:bg-emerald-100 rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer text-xs font-semibold text-emerald-900"
-                    >
-                      <span>🌾</span>
-                      <span>Demo Farmer</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleQuickSignIn("buyer")}
-                      disabled={isLoggingIn}
-                      className="p-2.5 border border-blue-200 bg-blue-50/60 hover:bg-blue-100 rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer text-xs font-semibold text-blue-900"
-                    >
-                      <span>🛒</span>
-                      <span>Demo Buyer</span>
-                    </button>
-                  </div>
-
-                  <div className="mt-4 pt-3 border-t border-slate-100">
-                    <p className="text-[11px] text-slate-500 mb-2">Or continue with Google & access Gmail features:</p>
-                    <button
-                      type="button"
-                      onClick={handleLogin}
-                      disabled={isLoggingIn}
-                      className="gsi-material-button w-full shadow-xs"
-                    >
-                      <div className="gsi-material-button-state"></div>
-                      <div className="gsi-material-button-content-wrapper">
-                        <div className="gsi-material-button-icon">
-                          <svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" style={{ display: 'block' }}>
-                            <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path>
-                            <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"></path>
-                            <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"></path>
-                            <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"></path>
-                            <path fill="none" d="M0 0h48v48H0z"></path>
-                          </svg>
-                        </div>
-                        <span className="gsi-material-button-contents text-slate-800 text-xs font-semibold">
-                          {isLoggingIn ? "Signing in with Google..." : "Sign in with Google & Gmail"}
-                        </span>
-                      </div>
-                    </button>
-                  </div>
-                </div>
               </Card>
             </motion.div>
           )}
