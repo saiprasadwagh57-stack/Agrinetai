@@ -1,0 +1,5 @@
+{
+  "name": "AgriNet AI",
+  "description": "Smart agriculture platform with AI price prediction, crop quality analysis, and a marketplace for farmers.",
+  "requestFramePermissions": ["camera", "microphone", "geolocation"]
+}

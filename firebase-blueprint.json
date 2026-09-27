@@ -1,0 +1,153 @@
+{
+  "entities": {
+    "Product": {
+      "title": "Product",
+      "description": "A crop product listed for sale by a farmer.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Product name" },
+        "crop": { "type": "string", "description": "Crop type" },
+        "price": { "type": "number", "description": "Price per kg" },
+        "location": { "type": "string", "description": "Farmer's location" },
+        "authorUid": { "type": "string", "description": "UID of the farmer" },
+        "authorName": { "type": "string", "description": "Name of the farmer" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Listing creation time" },
+        "grade": { "type": "string", "description": "Quality grade (A, B, C)" },
+        "imageUrl": { "type": "string", "description": "Optional image of the product" }
+      },
+      "required": ["name", "crop", "price", "location", "authorUid", "createdAt"]
+    },
+    "User": {
+      "title": "User",
+      "description": "A user profile in the AgriNet system.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "User's full name" },
+        "phone": { "type": "string", "description": "User's phone number" },
+        "role": { "type": "string", "enum": ["farmer", "buyer", "admin"], "description": "User role" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Account creation time" },
+        "walletBalance": { "type": "number", "description": "Current balance for farmers" },
+        "paymentDetails": {
+          "type": "object",
+          "properties": {
+            "upiId": { "type": "string" },
+            "bankName": { "type": "string" },
+            "accountNumber": { "type": "string" },
+            "ifscCode": { "type": "string" }
+          }
+        }
+      },
+      "required": ["name", "phone", "role", "createdAt"]
+    },
+    "Message": {
+      "title": "Message",
+      "description": "A message sent between a buyer and a farmer.",
+      "type": "object",
+      "properties": {
+        "senderId": { "type": "string", "description": "UID of the sender" },
+        "senderName": { "type": "string", "description": "Name of the sender" },
+        "receiverId": { "type": "string", "description": "UID of the receiver" },
+        "productId": { "type": "string", "description": "ID of the product being discussed" },
+        "productName": { "type": "string", "description": "Name of the product being discussed" },
+        "text": { "type": "string", "description": "Message content" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Message sent time" }
+      },
+      "required": ["senderId", "senderName", "receiverId", "text", "createdAt"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "A financial transaction (payment, commission, withdrawal).",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "UID of the user" },
+        "type": { "type": "string", "enum": ["credit", "debit"], "description": "Transaction type" },
+        "category": { "type": "string", "enum": ["sale", "withdrawal", "commission"], "description": "Transaction category" },
+        "amount": { "type": "number", "description": "Transaction amount" },
+        "status": { "type": "string", "enum": ["pending", "completed", "failed"], "description": "Transaction status" },
+        "description": { "type": "string", "description": "Transaction description" },
+        "orderId": { "type": "string", "description": "Associated order ID" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Transaction time" }
+      },
+      "required": ["userId", "type", "category", "amount", "status", "createdAt"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "A notification for a user.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "UID of the recipient" },
+        "title": { "type": "string", "description": "Notification title" },
+        "message": { "type": "string", "description": "Notification message" },
+        "type": { "type": "string", "enum": ["order", "payment", "system"], "description": "Notification type" },
+        "isRead": { "type": "boolean", "description": "Whether the notification has been read" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Notification time" },
+        "orderId": { "type": "string", "description": "Associated order ID" }
+      },
+      "required": ["userId", "title", "message", "type", "isRead", "createdAt"]
+    },
+    "CartItem": {
+      "title": "CartItem",
+      "description": "An item in a user's shopping cart.",
+      "type": "object",
+      "properties": {
+        "productId": { "type": "string", "description": "ID of the product" },
+        "name": { "type": "string", "description": "Product name" },
+        "price": { "type": "number", "description": "Price per unit" },
+        "quantity": { "type": "number", "description": "Quantity added to cart" },
+        "imageUrl": { "type": "string", "description": "Product image URL" },
+        "sellerId": { "type": "string", "description": "UID of the seller" },
+        "sellerName": { "type": "string", "description": "Name of the seller" }
+      },
+      "required": ["productId", "name", "price", "quantity", "sellerId"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "A completed order in the system.",
+      "type": "object",
+      "properties": {
+        "buyerId": { "type": "string", "description": "UID of the buyer" },
+        "buyerName": { "type": "string", "description": "Name of the buyer" },
+        "items": { "type": "array", "description": "List of cart items" },
+        "totalAmount": { "type": "number", "description": "Total order amount" },
+        "status": { "type": "string", "enum": ["pending", "processing", "shipped", "delivered", "cancelled"], "description": "Order status" },
+        "paymentMethod": { "type": "string", "enum": ["upi", "card", "netbanking", "cod"], "description": "Payment method" },
+        "paymentStatus": { "type": "string", "enum": ["pending", "paid", "failed"], "description": "Payment status" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Order creation time" },
+        "address": { "type": "string", "description": "Delivery address" },
+        "phone": { "type": "string", "description": "Contact phone number" },
+        "sellerIds": { "type": "array", "description": "List of seller UIDs involved in the order" }
+      },
+      "required": ["buyerId", "buyerName", "items", "totalAmount", "status", "paymentMethod", "paymentStatus", "createdAt", "address", "phone", "sellerIds"]
+    }
+  },
+  "firestore": {
+    "/products/{productId}": {
+      "schema": "Product",
+      "description": "Marketplace listings"
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/messages/{messageId}": {
+      "schema": "Message",
+      "description": "Direct messages between users"
+    },
+    "/users/{userId}/cart/{cartId}": {
+      "schema": "CartItem",
+      "description": "User's shopping cart items"
+    },
+    "/orders/{orderId}": {
+      "schema": "Order",
+      "description": "All orders in the system"
+    },
+    "/notifications/{notificationId}": {
+      "schema": "Notification",
+      "description": "User notifications"
+    },
+    "/transactions/{transactionId}": {
+      "schema": "Transaction",
+      "description": "Financial transactions"
+    }
+  }
+}

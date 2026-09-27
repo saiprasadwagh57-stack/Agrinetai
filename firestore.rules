@@ -1,0 +1,183 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    // Collection: products
+    // Document ID: {productId}
+    // Fields:
+    //   - name: string (required)
+    //   - crop: string (required)
+    //   - price: number (required)
+    //   - location: string (required)
+    //   - authorUid: string (required)
+    //   - authorName: string (optional)
+    //   - createdAt: timestamp (required)
+    //   - grade: string (optional)
+    //   - imageUrl: string (optional)
+    //
+    // Collection: users
+    // Document ID: {userId}
+    // Fields:
+    //   - name: string (required)
+    //   - phone: string (required)
+    //   - role: string (required, enum: farmer, buyer, admin)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: messages
+    // Document ID: {messageId}
+    // Fields:
+    //   - senderId: string (required)
+    //   - senderName: string (required)
+    //   - receiverId: string (required)
+    //   - productId: string (optional)
+    //   - productName: string (optional)
+    //   - text: string (required)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: users/{userId}/cart
+    // Document ID: {cartId}
+    // Fields:
+    //   - productId: string (required)
+    //   - name: string (required)
+    //   - price: number (required)
+    //   - quantity: number (required)
+    //   - imageUrl: string (optional)
+    //   - sellerId: string (required)
+    //   - sellerName: string (required)
+    //
+    // Collection: orders
+    // Document ID: {orderId}
+    // Fields:
+    //   - buyerId: string (required)
+    //   - buyerName: string (required)
+    //   - items: list (required)
+    //   - totalAmount: number (required)
+    //   - status: string (required, enum: pending, processing, shipped, delivered, cancelled)
+    //   - paymentMethod: string (required, enum: upi, card, netbanking, cod)
+    //   - paymentStatus: string (required, enum: pending, paid, failed)
+    //   - createdAt: timestamp (required)
+    //   - address: string (required)
+    //   - phone: string (required)
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.authorUid;
+    }
+
+    function isValidProduct(data) {
+      return data.keys().hasAll(['name', 'crop', 'price', 'location', 'authorUid', 'createdAt']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.crop is string && data.crop.size() > 0 &&
+             data.price is number && data.price >= 0 &&
+             data.location is string && data.location.size() > 0 &&
+             data.authorUid == request.auth.uid &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['name', 'phone', 'role', 'createdAt']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.phone is string && data.phone.size() > 0 &&
+             data.role in ['farmer', 'buyer', 'admin'] &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidMessage(data) {
+      return data.keys().hasAll(['senderId', 'senderName', 'receiverId', 'text', 'createdAt']) &&
+             data.senderId == request.auth.uid &&
+             data.senderName is string && data.senderName.size() > 0 &&
+             data.receiverId is string && data.receiverId.size() > 0 &&
+             data.text is string && data.text.size() > 0 && data.text.size() < 1000 &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidCartItem(data) {
+      return data.keys().hasAll(['productId', 'name', 'price', 'quantity', 'sellerId', 'sellerName']) &&
+             data.productId is string &&
+             data.name is string &&
+             data.price is number && data.price >= 0 &&
+             data.quantity is number && data.quantity > 0 &&
+             data.sellerId is string &&
+             data.sellerName is string;
+    }
+
+    function isValidOrder(data) {
+      return data.keys().hasAll(['buyerId', 'buyerName', 'items', 'totalAmount', 'status', 'paymentMethod', 'paymentStatus', 'createdAt', 'address', 'phone', 'sellerIds']) &&
+             data.buyerId == request.auth.uid &&
+             data.buyerName is string && data.buyerName.size() > 0 &&
+             data.items is list && data.items.size() > 0 &&
+             data.totalAmount is number && data.totalAmount >= 0 &&
+             data.status in ['pending', 'processing', 'shipped', 'delivered', 'cancelled'] &&
+             data.paymentMethod in ['upi', 'card', 'netbanking', 'cod'] &&
+             data.paymentStatus in ['pending', 'paid', 'failed'] &&
+             data.createdAt is timestamp &&
+             data.address is string && data.address.size() > 0 && data.address.size() < 500 &&
+             data.phone is string && data.phone.size() >= 10 && data.phone.size() <= 15 &&
+             data.sellerIds is list && data.sellerIds.size() > 0;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+             (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+              (request.auth.token.email == "saiprasadwagh57@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isOwner(userId) && isValidUser(request.resource.data) && (request.resource.data.role != 'admin' || isAdmin());
+      allow update: if isOwner(userId) && (request.resource.data.diff(resource.data).affectedKeys().hasAny(['paymentDetails', 'walletBalance']) || (isValidUser(request.resource.data) && (request.resource.data.role == resource.data.role || isAdmin())));
+
+      match /cart/{cartId} {
+        allow read: if isOwner(userId);
+        allow write: if isOwner(userId) && (request.method == 'DELETE' || isValidCartItem(request.resource.data));
+      }
+    }
+
+    match /products/{productId} {
+      allow read: if true; // Publicly viewable marketplace
+      allow create: if isAuthenticated() && isValidProduct(request.resource.data);
+      allow update: if isDocOwner() && isValidProduct(request.resource.data) && request.resource.data.authorUid == resource.data.authorUid;
+      allow delete: if isDocOwner() || isAdmin();
+    }
+
+    match /messages/{messageId} {
+      allow read: if isAuthenticated() && (request.auth.uid == resource.data.senderId || request.auth.uid == resource.data.receiverId);
+      allow create: if isAuthenticated() && isValidMessage(request.resource.data);
+    }
+
+    match /orders/{orderId} {
+      allow read: if isAuthenticated() && (request.auth.uid == resource.data.buyerId || request.auth.uid in resource.data.sellerIds || isAdmin());
+      allow create: if isAuthenticated() && isValidOrder(request.resource.data);
+      allow update: if isAuthenticated() && (isAdmin() || (request.auth.uid in resource.data.sellerIds && request.resource.data.diff(resource.data).affectedKeys().hasAny(['status'])) || (request.auth.uid == resource.data.buyerId && request.resource.data.diff(resource.data).affectedKeys().hasAny(['paymentStatus', 'paymentId', 'paymentMethodUsed'])));
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated() && request.auth.uid == resource.data.userId;
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated() && request.auth.uid == resource.data.userId && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead']);
+    }
+
+    match /transactions/{transactionId} {
+      allow read: if isAuthenticated() && (request.auth.uid == resource.data.userId || isAdmin());
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAdmin();
+    }
+  }
+}
